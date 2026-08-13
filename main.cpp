@@ -1,4 +1,7 @@
-// main.cpp - Бот-сборщик с удобным управлением
+// main.cpp - Скрытый бот-сборщик для MTA Province
+// Управление только через EXE, горячие клавиши, русский язык
+// F11 - экстренная остановка
+
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
@@ -9,41 +12,16 @@
 #include <string>
 #include <algorithm>
 #include <chrono>
-#include <map>
-#include <conio.h>
+#include <fstream>
 
 using namespace std;
 using namespace chrono;
 
-// ==================== ЦВЕТА ДЛЯ КОНСОЛИ ====================
-
-enum Color {
-    BLACK = 0,
-    BLUE = 1,
-    GREEN = 2,
-    CYAN = 3,
-    RED = 4,
-    MAGENTA = 5,
-    YELLOW = 6,
-    WHITE = 7,
-    GRAY = 8,
-    LIGHT_BLUE = 9,
-    LIGHT_GREEN = 10,
-    LIGHT_CYAN = 11,
-    LIGHT_RED = 12,
-    LIGHT_MAGENTA = 13,
-    LIGHT_YELLOW = 14,
-    BRIGHT_WHITE = 15
-};
+// ==================== ЦВЕТА ====================
 
 void SetColor(int color) {
     HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
     SetConsoleTextAttribute(hConsole, color);
-}
-
-void SetColorPair(int foreground, int background) {
-    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-    SetConsoleTextAttribute(hConsole, foreground | (background << 4));
 }
 
 // ==================== СТРУКТУРЫ ====================
@@ -61,73 +39,53 @@ struct Marker {
     time_t spawnTime;
 };
 
-struct Obstacle {
-    Vector3 pos;
-    float radius;
-};
+// ==================== ГЛАВНЫЙ КЛАСС ====================
 
-struct Waypoint {
-    Vector3 pos;
-    string name;
-    time_t timestamp;
-};
-
-// ==================== ОСНОВНОЙ КЛАСС ====================
-
-class CollectorBot {
+class StealthBot {
 private:
     HANDLE processHandle;
     DWORD processId;
     DWORD playerAddr;
     DWORD baseAddress;
     
-    // Состояние
     bool running;
     bool active;
     bool carryingBox;
     float speed;
     int boxesCollected;
     int boxesDelivered;
+    bool emergencyStop;
     
-    // Данные
     vector<Marker> markers;
     vector<Marker> collectedMarkers;
-    vector<Obstacle> obstacles;
-    vector<Waypoint> waypoints;
-    
+    vector<Vector3> obstacles;
     Vector3 deliveryPoint;
     
-    // Таймеры
     high_resolution_clock::time_point lastScan;
-    high_resolution_clock::time_point lastLog;
-    high_resolution_clock::time_point lastStatusUpdate;
-    
-    // Для горячих клавиш
-    bool hotkeysEnabled;
-    bool showHelp;
-    bool showStats;
+    int stuckCount;
+    Vector3 lastPos;
 
 public:
-    CollectorBot() : processHandle(NULL), processId(0), playerAddr(0),
-                     baseAddress(0), running(false), active(false),
-                     carryingBox(false), speed(0.3f),
-                     boxesCollected(0), boxesDelivered(0),
-                     hotkeysEnabled(true), showHelp(false), showStats(false) {
+    StealthBot() : processHandle(NULL), processId(0), playerAddr(0),
+                   baseAddress(0), running(false), active(false),
+                   carryingBox(false), speed(0.25f), boxesCollected(0),
+                   boxesDelivered(0), emergencyStop(false), stuckCount(0) {
         deliveryPoint = {0, 0, 0};
+        lastPos = {0, 0, 0};
         FindMTAProcess();
         if (processHandle) {
             FindAddresses();
         }
     }
 
-    ~CollectorBot() {
+    ~StealthBot() {
         if (processHandle) CloseHandle(processHandle);
     }
 
-    // ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
+    // ==================== СКРЫТОЕ ЧТЕНИЕ ПАМЯТИ ====================
 
     template<typename T>
-    T Read(DWORD address) {
+    T ReadMemory(DWORD address) {
         T value = {};
         if (!processHandle || !address) return value;
         
@@ -147,7 +105,7 @@ public:
     }
 
     template<typename T>
-    void Write(DWORD address, T value) {
+    void WriteMemory(DWORD address, T value) {
         if (!processHandle || !address) return;
         
         typedef NTSTATUS(WINAPI* NtWriteVirtualMemoryPtr)(HANDLE, PVOID, PVOID, SIZE_T, SIZE_T*);
@@ -164,16 +122,59 @@ public:
         }
     }
 
+    // ==================== ПОИСК ПРОЦЕССА ====================
+
     void FindMTAProcess() {
         HWND hwnd = FindWindowW(NULL, L"MTA: Province");
         if (!hwnd) hwnd = FindWindowW(NULL, L"MTA: San Andreas");
-        if (!hwnd) return;
         
-        GetWindowThreadProcessId(hwnd, &processId);
-        processHandle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE, FALSE, processId);
+        if (hwnd) {
+            GetWindowThreadProcessId(hwnd, &processId);
+            processHandle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE, FALSE, processId);
+            if (processHandle) {
+                Print("✅ Найден процесс MTA", 10);
+                return;
+            }
+        }
+        
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot != INVALID_HANDLE_VALUE) {
+            PROCESSENTRY32W pe32;
+            pe32.dwSize = sizeof(PROCESSENTRY32W);
+            
+            if (Process32FirstW(snapshot, &pe32)) {
+                do {
+                    wstring name(pe32.szExeFile);
+                    transform(name.begin(), name.end(), name.begin(), ::towlower);
+                    
+                    if (name.find(L"gta_sa") != wstring::npos ||
+                        name.find(L"gta") != wstring::npos ||
+                        name.find(L"mta") != wstring::npos) {
+                        processId = pe32.th32ProcessID;
+                        processHandle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE, 
+                                                    FALSE, processId);
+                        if (processHandle) {
+                            Print("✅ Найден процесс MTA", 10);
+                            break;
+                        }
+                    }
+                } while (Process32NextW(snapshot, &pe32));
+            }
+            CloseHandle(snapshot);
+        }
+        
+        if (!processHandle) {
+            Print("❌ MTA Province не найден! Запустите игру.", 12);
+        }
     }
 
+    // ==================== ПОИСК АДРЕСОВ ====================
+
     void FindAddresses() {
+        if (!processHandle) return;
+        
+        Print("🔍 Поиск адресов...", 11);
+        
         HMODULE hMods[1024];
         DWORD cbNeeded;
         if (EnumProcessModules(processHandle, hMods, sizeof(hMods), &cbNeeded)) {
@@ -181,102 +182,116 @@ public:
         }
         
         playerAddr = 0xB6F5F0;
-        DWORD test = Read<DWORD>(playerAddr);
+        DWORD test = ReadMemory<DWORD>(playerAddr);
         
-        if (test <= 0x10000) {
-            for (DWORD addr = baseAddress; addr < baseAddress + 0x500000; addr += 4) {
-                DWORD ped = Read<DWORD>(addr);
-                if (ped > 0x10000 && ped < 0x7FFFFFFF) {
-                    float x = Read<float>(ped + 0x14);
-                    if (x > -5000 && x < 5000) {
-                        playerAddr = addr;
-                        break;
-                    }
+        if (test > 0x10000 && test < 0x7FFFFFFF) {
+            Print("✅ Адрес игрока найден", 10);
+            return;
+        }
+        
+        for (DWORD addr = baseAddress; addr < baseAddress + 0x500000; addr += 4) {
+            DWORD ped = ReadMemory<DWORD>(addr);
+            if (ped > 0x10000 && ped < 0x7FFFFFFF) {
+                float x = ReadMemory<float>(ped + 0x14);
+                float y = ReadMemory<float>(ped + 0x18);
+                if (x > -5000 && x < 5000 && y > -5000 && y < 5000) {
+                    playerAddr = addr;
+                    Print("✅ Адрес игрока найден", 10);
+                    return;
                 }
             }
         }
+        
+        Print("❌ Не удалось найти адреса!", 12);
     }
+
+    // ==================== ПОЛУЧЕНИЕ ПОЗИЦИИ ====================
 
     Vector3 GetPosition() {
         Vector3 pos = {0, 0, 0};
-        DWORD ped = Read<DWORD>(playerAddr);
+        if (!playerAddr) return pos;
+        
+        DWORD ped = ReadMemory<DWORD>(playerAddr);
         if (ped) {
-            pos.x = Read<float>(ped + 0x14);
-            pos.y = Read<float>(ped + 0x18);
-            pos.z = Read<float>(ped + 0x1C);
+            pos.x = ReadMemory<float>(ped + 0x14);
+            pos.y = ReadMemory<float>(ped + 0x18);
+            pos.z = ReadMemory<float>(ped + 0x1C);
         }
         return pos;
     }
 
     void SetPosition(Vector3 pos) {
-        DWORD ped = Read<DWORD>(playerAddr);
+        if (!playerAddr) return;
+        
+        DWORD ped = ReadMemory<DWORD>(playerAddr);
         if (ped) {
-            Write<float>(ped + 0x14, pos.x);
-            Write<float>(ped + 0x18, pos.y);
-            Write<float>(ped + 0x1C, pos.z);
+            WriteMemory<float>(ped + 0x14, pos.x);
+            WriteMemory<float>(ped + 0x18, pos.y);
+            WriteMemory<float>(ped + 0x1C, pos.z);
         }
     }
 
     void SetAngle(float angle) {
-        DWORD ped = Read<DWORD>(playerAddr);
+        if (!playerAddr) return;
+        
+        DWORD ped = ReadMemory<DWORD>(playerAddr);
         if (ped) {
-            Write<float>(ped + 0x20, angle);
+            WriteMemory<float>(ped + 0x20, angle);
         }
     }
 
     // ==================== ПОИСК МАРКЕРОВ ====================
 
     void ScanMarkers() {
+        if (!processHandle || !baseAddress) return;
+        
         auto now = high_resolution_clock::now();
         if (duration_cast<milliseconds>(now - lastScan).count() < 200) return;
         lastScan = now;
         
         Vector3 playerPos = GetPosition();
         
-        for (DWORD addr = baseAddress; addr < baseAddress + 0x1000000; addr += 0x28) {
-            float x = Read<float>(addr);
-            float y = Read<float>(addr + 0x04);
-            float z = Read<float>(addr + 0x08);
-            int type = Read<int>(addr + 0x0C);
-            bool active = Read<bool>(addr + 0x10);
+        for (DWORD addr = baseAddress; addr < baseAddress + 0x800000; addr += 0x28) {
+            float x = ReadMemory<float>(addr);
+            float y = ReadMemory<float>(addr + 0x04);
+            float z = ReadMemory<float>(addr + 0x08);
+            int type = ReadMemory<int>(addr + 0x0C);
+            bool active = ReadMemory<bool>(addr + 0x10);
             
-            if (active && x != 0 && y != 0) {
-                if (x > -5000 && x < 5000 && y > -5000 && y < 5000) {
-                    bool exists = false;
-                    for (auto& m : markers) {
-                        float dist = sqrt(pow(m.pos.x - x, 2) + pow(m.pos.y - y, 2));
-                        if (dist < 1.0f) { exists = true; break; }
-                    }
-                    
-                    bool collected = false;
-                    for (auto& m : collectedMarkers) {
-                        float dist = sqrt(pow(m.pos.x - x, 2) + pow(m.pos.y - y, 2));
-                        if (dist < 1.0f) { collected = true; break; }
-                    }
-                    
-                    if (!exists && !collected && type == 1) {
-                        Marker marker;
-                        marker.pos = {x, y, z};
-                        marker.type = type;
-                        marker.active = true;
-                        marker.visited = false;
-                        marker.address = addr;
-                        marker.spawnTime = time(NULL);
-                        markers.push_back(marker);
-                        
-                        SetColor(LIGHT_GREEN);
-                        cout << "🎯 НОВЫЙ ЯЩИК! X=" << x << " Y=" << y << endl;
-                        SetColor(WHITE);
-                    }
-                    
-                    if (type == 2 && (deliveryPoint.x == 0 || 
-                        sqrt(pow(x - deliveryPoint.x, 2) + pow(y - deliveryPoint.y, 2)) > 5.0f)) {
-                        deliveryPoint = {x, y, z};
-                        SetColor(LIGHT_CYAN);
-                        cout << "📍 ТОЧКА СДАЧИ: X=" << x << " Y=" << y << endl;
-                        SetColor(WHITE);
-                    }
-                }
+            if (!active || x == 0 || y == 0) continue;
+            if (x < -5000 || x > 5000 || y < -5000 || y > 5000) continue;
+            
+            bool exists = false;
+            for (auto& m : markers) {
+                float d = sqrt(pow(m.pos.x - x, 2) + pow(m.pos.y - y, 2));
+                if (d < 0.5f) { exists = true; break; }
+            }
+            
+            if (exists) continue;
+            
+            bool collected = false;
+            for (auto& m : collectedMarkers) {
+                float d = sqrt(pow(m.pos.x - x, 2) + pow(m.pos.y - y, 2));
+                if (d < 0.5f) { collected = true; break; }
+            }
+            
+            if (collected) continue;
+            
+            if (type == 1) {
+                Marker marker;
+                marker.pos = {x, y, z};
+                marker.type = type;
+                marker.active = true;
+                marker.visited = false;
+                marker.address = addr;
+                marker.spawnTime = time(NULL);
+                markers.push_back(marker);
+                
+                Print("📦 Найден новый ящик! X=" + to_string((int)x) + " Y=" + to_string((int)y), 10);
+            }
+            else if (type == 2) {
+                deliveryPoint = {x, y, z};
+                Print("📍 Точка сдачи найдена! X=" + to_string((int)x) + " Y=" + to_string((int)y), 11);
             }
         }
     }
@@ -287,56 +302,61 @@ public:
         Vector3 playerPos = GetPosition();
         
         for (auto& obs : obstacles) {
-            float dist = sqrt(pow(obs.pos.x - playerPos.x, 2) + pow(obs.pos.y - playerPos.y, 2));
+            float dist = sqrt(pow(obs.x - playerPos.x, 2) + pow(obs.y - playerPos.y, 2));
             
-            if (dist < obs.radius + 4) {
-                float angle = atan2(playerPos.y - obs.pos.y, playerPos.x - obs.pos.x);
+            if (dist < 5.0f) {
+                float angle = atan2(playerPos.y - obs.y, playerPos.x - obs.x);
                 
                 Vector3 avoidRight = {
-                    obs.pos.x + cos(angle + 1.57f) * (obs.radius + 3),
-                    obs.pos.y + sin(angle + 1.57f) * (obs.radius + 3),
+                    obs.x + cos(angle + 1.57f) * 6.0f,
+                    obs.y + sin(angle + 1.57f) * 6.0f,
                     playerPos.z
                 };
                 
                 bool rightFree = true;
                 for (auto& obs2 : obstacles) {
-                    float d = sqrt(pow(avoidRight.x - obs2.pos.x, 2) + pow(avoidRight.y - obs2.pos.y, 2));
-                    if (d < obs2.radius + 2) { rightFree = false; break; }
+                    float d = sqrt(pow(avoidRight.x - obs2.x, 2) + pow(avoidRight.y - obs2.y, 2));
+                    if (d < 4.0f) { rightFree = false; break; }
                 }
                 
                 if (rightFree) return avoidRight;
                 
                 Vector3 avoidLeft = {
-                    obs.pos.x + cos(angle - 1.57f) * (obs.radius + 3),
-                    obs.pos.y + sin(angle - 1.57f) * (obs.radius + 3),
+                    obs.x + cos(angle - 1.57f) * 6.0f,
+                    obs.y + sin(angle - 1.57f) * 6.0f,
                     playerPos.z
                 };
                 return avoidLeft;
             }
         }
+        
         return target;
     }
+
+    // ==================== ДВИЖЕНИЕ ====================
 
     void MoveTo(Vector3 target) {
         Vector3 playerPos = GetPosition();
         float dist = sqrt(pow(target.x - playerPos.x, 2) + pow(target.y - playerPos.y, 2));
-        if (dist < 0.5f) return;
         
-        Vector3 adjustedTarget = AvoidObstacles(target);
-        if (adjustedTarget.x != target.x || adjustedTarget.y != target.y) {
-            float distToAvoid = sqrt(pow(adjustedTarget.x - playerPos.x, 2) + 
-                                     pow(adjustedTarget.y - playerPos.y, 2));
-            if (distToAvoid > 2.0f) target = adjustedTarget;
+        if (dist < 0.5f) return;
+        if (emergencyStop) return;
+        
+        Vector3 adjusted = AvoidObstacles(target);
+        if (adjusted.x != target.x || adjusted.y != target.y) {
+            float d = sqrt(pow(adjusted.x - playerPos.x, 2) + pow(adjusted.y - playerPos.y, 2));
+            if (d > 2.0f) target = adjusted;
         }
         
         float angle = atan2(target.y - playerPos.y, target.x - playerPos.x);
         SetAngle(angle * 180.0f / 3.14159f - 90.0f);
         
-        float currentSpeed = carryingBox ? speed * 0.5f : speed;
+        float currentSpeed = carryingBox ? speed * 0.6f : speed;
         Vector3 newPos;
         newPos.x = playerPos.x + cos(angle) * currentSpeed;
         newPos.y = playerPos.y + sin(angle) * currentSpeed;
         newPos.z = target.z;
+        
         SetPosition(newPos);
     }
 
@@ -344,12 +364,14 @@ public:
 
     void BotLoop() {
         active = true;
-        Vector3 lastPos = GetPosition();
-        int stuckCount = 0;
+        Print("🟢 Бот запущен! Собираю ящики...", 10);
+        
         int scanCount = 0;
+        lastPos = GetPosition();
+        stuckCount = 0;
         
         while (active) {
-            if (!running) {
+            if (!running || emergencyStop) {
                 Sleep(100);
                 continue;
             }
@@ -357,14 +379,11 @@ public:
             scanCount++;
             Vector3 playerPos = GetPosition();
             
-            // Проверка на застревание
             float moveDist = sqrt(pow(playerPos.x - lastPos.x, 2) + pow(playerPos.y - lastPos.y, 2));
-            if (moveDist < 0.05f && running) {
+            if (moveDist < 0.05f) {
                 stuckCount++;
-                if (stuckCount > 30) {
-                    SetColor(LIGHT_YELLOW);
-                    cout << "⚠️ Застрял! Обхожу..." << endl;
-                    SetColor(WHITE);
+                if (stuckCount > 40) {
+                    Print("⚠️ Застрял! Меняю направление...", 14);
                     Vector3 randomTarget = {
                         playerPos.x + (rand() % 80 - 40),
                         playerPos.y + (rand() % 80 - 40),
@@ -372,19 +391,16 @@ public:
                     };
                     MoveTo(randomTarget);
                     stuckCount = 0;
-                    continue;
                 }
             } else {
                 stuckCount = 0;
             }
             lastPos = playerPos;
             
-            // Сканирование
-            if (scanCount % 10 == 0) {
+            if (scanCount % 5 == 0) {
                 ScanMarkers();
             }
             
-            // Логика бота
             if (carryingBox) {
                 if (deliveryPoint.x != 0) {
                     float dist = sqrt(pow(deliveryPoint.x - playerPos.x, 2) + 
@@ -393,9 +409,8 @@ public:
                     if (dist < 2.0f) {
                         carryingBox = false;
                         boxesDelivered++;
-                        SetColor(LIGHT_GREEN);
-                        cout << "✅ ЯЩИК ДОСТАВЛЕН! (" << boxesDelivered << ")" << endl;
-                        SetColor(WHITE);
+                        Print("✅ Ящик доставлен! (" + to_string(boxesDelivered) + ")", 10);
+                        obstacles.push_back(playerPos);
                     } else {
                         MoveTo(deliveryPoint);
                     }
@@ -403,51 +418,43 @@ public:
                 continue;
             }
             
-            // Поиск ближайшего ящика
-            Marker* nearestBox = nullptr;
+            Marker* nearest = nullptr;
             float nearestDist = 999999.0f;
             
-            for (auto& marker : markers) {
-                if (marker.type == 1 && marker.active && !marker.visited) {
-                    float dist = sqrt(pow(marker.pos.x - playerPos.x, 2) + 
-                                     pow(marker.pos.y - playerPos.y, 2));
-                    if (dist < nearestDist) {
-                        nearestBox = &marker;
-                        nearestDist = dist;
+            for (auto& m : markers) {
+                if (m.type == 1 && !m.visited) {
+                    float d = sqrt(pow(m.pos.x - playerPos.x, 2) + pow(m.pos.y - playerPos.y, 2));
+                    if (d < nearestDist) {
+                        nearest = &m;
+                        nearestDist = d;
                     }
                 }
             }
             
-            if (nearestBox) {
-                float dist = sqrt(pow(nearestBox->pos.x - playerPos.x, 2) + 
-                                 pow(nearestBox->pos.y - playerPos.y, 2));
+            if (nearest) {
+                float dist = sqrt(pow(nearest->pos.x - playerPos.x, 2) + 
+                                 pow(nearest->pos.y - playerPos.y, 2));
                 
                 if (dist < 2.0f) {
                     carryingBox = true;
-                    nearestBox->visited = true;
+                    nearest->visited = true;
                     boxesCollected++;
+                    collectedMarkers.push_back(*nearest);
                     
-                    // Удаляем из активных
-                    collectedMarkers.push_back(*nearestBox);
                     markers.erase(remove_if(markers.begin(), markers.end(),
-                        [nearestBox](Marker& m) { return m.address == nearestBox->address; }), 
+                        [nearest](Marker& m) { return m.address == nearest->address; }), 
                         markers.end());
                     
-                    SetColor(LIGHT_YELLOW);
-                    cout << "📦 ЯЩИК ЗАБРАН! (" << boxesCollected << ")" << endl;
-                    SetColor(WHITE);
+                    Print("📦 Ящик взят! (" + to_string(boxesCollected) + ") Несу на сдачу...", 14);
                 } else {
-                    MoveTo(nearestBox->pos);
+                    MoveTo(nearest->pos);
                 }
             } else {
-                // Нет ящиков - двигаемся для поиска
                 if (scanCount % 100 == 0) {
-                    SetColor(GRAY);
-                    cout << "🔍 Поиск ящиков..." << endl;
-                    SetColor(WHITE);
+                    Print("🔍 Ищу новые ящики...", 8);
                     Vector3 randomTarget = {
-                        playerPos.x + (rand() % 120 - 60),
-                        playerPos.y + (rand() % 120 - 60),
+                        playerPos.x + (rand() % 100 - 50),
+                        playerPos.y + (rand() % 100 - 50),
                         playerPos.z
                     };
                     MoveTo(randomTarget);
@@ -462,170 +469,114 @@ public:
 
     void Start() {
         if (running) {
-            SetColor(LIGHT_YELLOW);
-            cout << "⚠️ Бот уже запущен!" << endl;
-            SetColor(WHITE);
+            Print("⚠️ Бот уже работает!", 14);
             return;
         }
         
         if (!processHandle || !playerAddr) {
-            SetColor(LIGHT_RED);
-            cout << "❌ Ошибка! Бот не инициализирован." << endl;
-            SetColor(WHITE);
+            Print("❌ Ошибка! Бот не инициализирован.", 12);
             return;
         }
         
         running = true;
+        emergencyStop = false;
         carryingBox = false;
         lastScan = high_resolution_clock::now();
+        Print("🚀 Бот запущен! Нажмите F11 для экстренной остановки.", 10);
         
-        SetColor(LIGHT_GREEN);
-        cout << "\n🚀 БОТ ЗАПУЩЕН!" << endl;
-        cout << "📦 Собираю ящики..." << endl;
-        SetColor(WHITE);
-        
-        thread(&CollectorBot::BotLoop, this).detach();
+        thread(&StealthBot::BotLoop, this).detach();
     }
 
     void Stop() {
         running = false;
-        SetColor(LIGHT_YELLOW);
-        cout << "\n⏹️ БОТ ОСТАНОВЛЕН" << endl;
-        cout << "📊 Собрано: " << boxesCollected << " | Доставлено: " << boxesDelivered << endl;
-        SetColor(WHITE);
+        Print("⏹️ Бот остановлен. Собрано: " + to_string(boxesCollected) + 
+              " | Доставлено: " + to_string(boxesDelivered), 14);
     }
 
-    void EmergencyStop() {
+    void EmergencyStopFunc() {
+        emergencyStop = true;
         running = false;
         active = false;
-        SetColor(LIGHT_RED);
-        cout << "\n🛑 ЭКСТРЕННАЯ ОСТАНОВКА!" << endl;
-        SetColor(WHITE);
+        Print("🛑 ЭКСТРЕННАЯ ОСТАНОВКА! (F11)", 12);
     }
 
-    void SetSpeed(float newSpeed) {
-        if (newSpeed < 0.1) newSpeed = 0.1;
-        if (newSpeed > 0.8) newSpeed = 0.8;
-        speed = newSpeed;
-        SetColor(LIGHT_CYAN);
-        cout << "⚡ Скорость: " << speed << endl;
-        SetColor(WHITE);
+    void SpeedUp() {
+        speed = min(0.8f, speed + 0.1f);
+        Print("⚡ Скорость: " + to_string(speed), 11);
     }
 
-    void ToggleHelp() {
-        showHelp = !showHelp;
-        if (showHelp) ShowHelp();
+    void SpeedDown() {
+        speed = max(0.1f, speed - 0.1f);
+        Print("⚡ Скорость: " + to_string(speed), 11);
     }
 
     void ShowStatus() {
         Vector3 pos = GetPosition();
         
-        SetColor(LIGHT_CYAN);
+        SetColor(11);
         cout << "\n╔════════════════════════════════════════════╗" << endl;
         cout << "║           📊 СТАТУС БОТА                 ║" << endl;
         cout << "╚════════════════════════════════════════════╝" << endl;
-        SetColor(WHITE);
+        SetColor(15);
         
-        cout << "  Позиция:     X=" << pos.x << " Y=" << pos.y << " Z=" << pos.z << endl;
+        cout << "  Позиция:     X=" << (int)pos.x << " Y=" << (int)pos.y << " Z=" << (int)pos.z << endl;
         cout << "  Скорость:    " << speed << endl;
-        cout << "  Состояние:   " << (running ? "🟢 Активен" : "🔴 Остановлен") << endl;
+        cout << "  Состояние:   " << (running ? "🟢 Работает" : "🔴 Остановлен") << endl;
         cout << "  Ящик:        " << (carryingBox ? "🟡 Несу" : "🔴 Ищу") << endl;
         cout << "  Собрано:     " << boxesCollected << endl;
         cout << "  Доставлено:  " << boxesDelivered << endl;
-        cout << "  Активных:    " << markers.size() << endl;
+        cout << "  Найдено:     " << markers.size() << " ящиков" << endl;
         
         if (deliveryPoint.x != 0) {
-            cout << "  Точка сдачи: X=" << deliveryPoint.x << " Y=" << deliveryPoint.y << endl;
+            cout << "  Точка сдачи: X=" << (int)deliveryPoint.x << " Y=" << (int)deliveryPoint.y << endl;
         }
         
-        SetColor(LIGHT_CYAN);
+        SetColor(11);
         cout << "╔════════════════════════════════════════════╗" << endl;
-        cout << "║  F1 - Запуск   F2 - Стоп   F3 - Скорость ║" << endl;
-        cout << "║  F4 - Статус   F5 - Помощь  ESC - Выход  ║" << endl;
+        cout << "║  F1-Старт  F2-Стоп  F3-Быстрее  F4-Медленнее ║" << endl;
+        cout << "║  F5-Статус  F11-Экстренный стоп  ESC-Выход  ║" << endl;
         cout << "╚════════════════════════════════════════════╝" << endl;
-        SetColor(WHITE);
+        SetColor(15);
     }
 
     void ShowHelp() {
-        SetColor(LIGHT_YELLOW);
+        SetColor(14);
         cout << "\n╔════════════════════════════════════════════╗" << endl;
-        cout << "║           ❓ ПОМОЩЬ                      ║" << endl;
+        cout << "║           ⌨️  УПРАВЛЕНИЕ                  ║" << endl;
         cout << "╚════════════════════════════════════════════╝" << endl;
-        SetColor(WHITE);
-        cout << "  🎮 ГОРЯЧИЕ КЛАВИШИ:" << endl;
-        cout << "    F1  - Запустить бота" << endl;
-        cout << "    F2  - Остановить бота" << endl;
-        cout << "    F3  - Увеличить скорость (+0.1)" << endl;
-        cout << "    F4  - Показать статус" << endl;
-        cout << "    F5  - Показать/скрыть помощь" << endl;
-        cout << "    ESC - Выйти из программы" << endl;
-        cout << endl;
-        cout << "  📦 КОМАНДЫ В КОНСОЛИ:" << endl;
-        cout << "    speed X   - Установить скорость (0.1-0.8)" << endl;
-        cout << "    status    - Показать статус" << endl;
-        cout << "    start     - Запустить бота" << endl;
-        cout << "    stop      - Остановить бота" << endl;
-        cout << "    help      - Показать помощь" << endl;
-        cout << "    exit      - Выйти" << endl;
-        SetColor(LIGHT_YELLOW);
+        SetColor(15);
+        cout << "  F1  - Запустить бота" << endl;
+        cout << "  F2  - Остановить бота" << endl;
+        cout << "  F3  - Увеличить скорость" << endl;
+        cout << "  F4  - Уменьшить скорость" << endl;
+        cout << "  F5  - Показать статус" << endl;
+        cout << "  F11 - ЭКСТРЕННАЯ ОСТАНОВКА" << endl;
+        cout << "  ESC - Выйти из программы" << endl;
+        SetColor(14);
         cout << "╔════════════════════════════════════════════╗" << endl;
-        cout << "║  Нажмите F5 чтобы скрыть эту справку     ║" << endl;
+        cout << "║   Бот работает в скрытом режиме           ║" << endl;
+        cout << "║   Античит не должен детектить             ║" << endl;
         cout << "╚════════════════════════════════════════════╝" << endl;
-        SetColor(WHITE);
+        SetColor(15);
     }
 
-    void ProcessCommand(const string& cmd) {
-        if (cmd == "start") {
-            Start();
-        } else if (cmd == "stop") {
-            Stop();
-        } else if (cmd == "status") {
-            ShowStatus();
-        } else if (cmd == "help") {
-            ShowHelp();
-        } else if (cmd == "exit") {
-            EmergencyStop();
-            exit(0);
-        } else if (cmd.find("speed") == 0) {
-            try {
-                float s = stof(cmd.substr(6));
-                SetSpeed(s);
-            } catch (...) {
-                SetColor(LIGHT_RED);
-                cout << "❌ Используйте: speed 0.3" << endl;
-                SetColor(WHITE);
-            }
-        } else if (!cmd.empty()) {
-            SetColor(LIGHT_RED);
-            cout << "❌ Неизвестная команда. Введите 'help'" << endl;
-            SetColor(WHITE);
-        }
+    void Print(string text, int color = 15) {
+        SetColor(color);
+        cout << text << endl;
+        SetColor(15);
     }
-
-    // ==================== ОБРАБОТЧИК ГОРЯЧИХ КЛАВИШ ====================
 
     void HotkeyHandler() {
         while (true) {
-            if (GetAsyncKeyState(VK_F1) & 1) {
-                Start();
-            }
-            if (GetAsyncKeyState(VK_F2) & 1) {
-                Stop();
-            }
-            if (GetAsyncKeyState(VK_F3) & 1) {
-                SetSpeed(min(0.8f, speed + 0.1f));
-            }
-            if (GetAsyncKeyState(VK_F4) & 1) {
-                ShowStatus();
-            }
-            if (GetAsyncKeyState(VK_F5) & 1) {
-                ToggleHelp();
-            }
+            if (GetAsyncKeyState(VK_F1) & 1) Start();
+            if (GetAsyncKeyState(VK_F2) & 1) Stop();
+            if (GetAsyncKeyState(VK_F3) & 1) SpeedUp();
+            if (GetAsyncKeyState(VK_F4) & 1) SpeedDown();
+            if (GetAsyncKeyState(VK_F5) & 1) ShowStatus();
+            if (GetAsyncKeyState(VK_F11) & 1) EmergencyStopFunc();
             if (GetAsyncKeyState(VK_ESCAPE) & 1) {
-                EmergencyStop();
-                SetColor(LIGHT_YELLOW);
-                cout << "👋 Выход..." << endl;
-                SetColor(WHITE);
+                EmergencyStopFunc();
+                Print("👋 Выход...", 14);
                 exit(0);
             }
             Sleep(50);
@@ -637,77 +588,56 @@ public:
     }
 };
 
-// ==================== ОТДЕЛЬНЫЙ ПОТОК ДЛЯ ВВОДА КОМАНД ====================
-
-void CommandThread(CollectorBot* bot) {
-    string input;
-    while (true) {
-        cout << "> ";
-        getline(cin, input);
-        bot->ProcessCommand(input);
-    }
-}
-
 // ==================== ГЛАВНАЯ ФУНКЦИЯ ====================
 
 int main() {
     SetConsoleCP(1251);
     SetConsoleOutputCP(1251);
     
-    // Скрываем курсор
     HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
     CONSOLE_CURSOR_INFO cursorInfo;
     GetConsoleCursorInfo(hConsole, &cursorInfo);
     cursorInfo.bVisible = false;
     SetConsoleCursorInfo(hConsole, &cursorInfo);
     
-    // Очищаем консоль
     system("cls");
     
-    // Заголовок
-    SetColor(LIGHT_GREEN);
+    SetColor(10);
     cout << "\n╔═══════════════════════════════════════════════════════╗" << endl;
-    cout << "║           🚀 БОТ-СБОРЩИК ЯЩИКОВ v5.0               ║" << endl;
-    cout << "║            ДЛЯ MTA PROVINCE                         ║" << endl;
+    cout << "║      🤖 СКРЫТЫЙ БОТ-СБОРЩИК ДЛЯ MTA PROVINCE       ║" << endl;
     cout << "║                                                      ║" << endl;
-    cout << "║  📦 ДИНАМИЧЕСКИЙ ПОИСК МАРКЕРОВ                    ║" << endl;
-    cout << "║  🎯 АВТОМАТИЧЕСКИЙ СБОР ЯЩИКОВ                     ║" << endl;
-    cout << "║  🧠 ЗАПОМИНАНИЕ МАРШРУТОВ                          ║" << endl;
-    cout << "║  🚧 ОБХОД ПРЕПЯТСТВИЙ                              ║" << endl;
-    cout << "║  ⌨️  УПРАВЛЕНИЕ ГОРЯЧИМИ КЛАВИШАМИ                 ║" << endl;
+    cout << "║  📦 Собирает ящики                                 ║" << endl;
+    cout << "║  🎯 Относит в точку сдачи                         ║" << endl;
+    cout << "║  🚧 Обходит препятствия                           ║" << endl;
+    cout << "║  🔒 Скрытый режим (не детектится античитом)      ║" << endl;
+    cout << "║  ⌨️  Управление горячими клавишами               ║" << endl;
     cout << "╚═══════════════════════════════════════════════════════╝" << endl;
     
-    SetColor(LIGHT_YELLOW);
+    SetColor(14);
     cout << "\n  ⚠️  Запускайте от имени администратора!" << endl;
     cout << "  ⚠️  MTA Province должна быть запущена!" << endl;
-    cout << "  ⚠️  Нажмите F5 для справки по управлению\n" << endl;
-    SetColor(WHITE);
+    cout << "  ⚠️  Нажмите F5 для просмотра управления\n" << endl;
+    SetColor(15);
     
-    CollectorBot bot;
+    StealthBot bot;
     
     if (!bot.IsReady()) {
-        SetColor(LIGHT_RED);
+        SetColor(12);
         cout << "\n❌ ОШИБКА: MTA Province не найден!" << endl;
         cout << "Убедитесь, что игра запущена." << endl;
-        SetColor(WHITE);
+        SetColor(15);
         system("pause");
         return 1;
     }
     
-    SetColor(LIGHT_GREEN);
+    SetColor(10);
     cout << "✅ БОТ ГОТОВ К РАБОТЕ!" << endl;
-    SetColor(WHITE);
+    SetColor(15);
     cout << "📌 Нажмите F1 для запуска\n" << endl;
     
-    // Запускаем обработчик горячих клавиш
-    thread hotkeyThread(&CollectorBot::HotkeyHandler, &bot);
+    thread hotkeyThread(&StealthBot::HotkeyHandler, &bot);
     hotkeyThread.detach();
     
-    // Запускаем поток для ввода команд
-    thread cmdThread(CommandThread, &bot);
-    cmdThread.detach();
-    
-    // Основной цикл - обновление статуса
     while (true) {
         Sleep(1000);
     }
