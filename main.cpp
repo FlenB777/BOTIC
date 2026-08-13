@@ -1,6 +1,4 @@
-// bot_auto_find.cpp
-// Бот с автоматическим поиском адресов через паттерны
-
+// main.cpp - Бот-сборщик с удобным управлением
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
@@ -8,9 +6,47 @@
 #include <vector>
 #include <cmath>
 #include <thread>
-#include <random>
 #include <string>
 #include <algorithm>
+#include <chrono>
+#include <map>
+#include <conio.h>
+
+using namespace std;
+using namespace chrono;
+
+// ==================== ЦВЕТА ДЛЯ КОНСОЛИ ====================
+
+enum Color {
+    BLACK = 0,
+    BLUE = 1,
+    GREEN = 2,
+    CYAN = 3,
+    RED = 4,
+    MAGENTA = 5,
+    YELLOW = 6,
+    WHITE = 7,
+    GRAY = 8,
+    LIGHT_BLUE = 9,
+    LIGHT_GREEN = 10,
+    LIGHT_CYAN = 11,
+    LIGHT_RED = 12,
+    LIGHT_MAGENTA = 13,
+    LIGHT_YELLOW = 14,
+    BRIGHT_WHITE = 15
+};
+
+void SetColor(int color) {
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    SetConsoleTextAttribute(hConsole, color);
+}
+
+void SetColorPair(int foreground, int background) {
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    SetConsoleTextAttribute(hConsole, foreground | (background << 4));
+}
+
+// ==================== СТРУКТУРЫ ====================
 
 struct Vector3 {
     float x, y, z;
@@ -20,6 +56,9 @@ struct Marker {
     Vector3 pos;
     int type;
     bool active;
+    bool visited;
+    DWORD address;
+    time_t spawnTime;
 };
 
 struct Obstacle {
@@ -27,385 +66,391 @@ struct Obstacle {
     float radius;
 };
 
-class AutoMemoryBot {
+struct Waypoint {
+    Vector3 pos;
+    string name;
+    time_t timestamp;
+};
+
+// ==================== ОСНОВНОЙ КЛАСС ====================
+
+class CollectorBot {
 private:
     HANDLE processHandle;
     DWORD processId;
+    DWORD playerAddr;
     DWORD baseAddress;
-    DWORD playerAddress;
-    DWORD markerPoolAddress;
     
-    std::vector<Marker> markers;
-    std::vector<Obstacle> obstacles;
-    
+    // Состояние
+    bool running;
     bool active;
     bool carryingBox;
-    bool learningMode;
-    bool emergency;
-    bool addressesFound;
-    bool botRunning;
+    float speed;
+    int boxesCollected;
+    int boxesDelivered;
+    
+    // Данные
+    vector<Marker> markers;
+    vector<Marker> collectedMarkers;
+    vector<Obstacle> obstacles;
+    vector<Waypoint> waypoints;
+    
+    Vector3 deliveryPoint;
+    
+    // Таймеры
+    high_resolution_clock::time_point lastScan;
+    high_resolution_clock::time_point lastLog;
+    high_resolution_clock::time_point lastStatusUpdate;
+    
+    // Для горячих клавиш
+    bool hotkeysEnabled;
+    bool showHelp;
+    bool showStats;
 
 public:
-    AutoMemoryBot() : processHandle(NULL), processId(0), baseAddress(0),
-                      playerAddress(0), markerPoolAddress(0),
-                      active(false), carryingBox(false), 
-                      learningMode(false), emergency(false), 
-                      addressesFound(false), botRunning(false) {
+    CollectorBot() : processHandle(NULL), processId(0), playerAddr(0),
+                     baseAddress(0), running(false), active(false),
+                     carryingBox(false), speed(0.3f),
+                     boxesCollected(0), boxesDelivered(0),
+                     hotkeysEnabled(true), showHelp(false), showStats(false) {
+        deliveryPoint = {0, 0, 0};
         FindMTAProcess();
         if (processHandle) {
-            AutoFindAddresses();
+            FindAddresses();
         }
     }
 
-    ~AutoMemoryBot() {
-        if (processHandle) {
-            CloseHandle(processHandle);
-        }
+    ~CollectorBot() {
+        if (processHandle) CloseHandle(processHandle);
     }
 
-    void FindMTAProcess() {
-        // Поиск процесса MTA через окно
-        HWND hwnd = FindWindowW(L"GTA:SA", NULL);
-        if (!hwnd) {
-            hwnd = FindWindowW(NULL, L"MTA: Province");
-        }
-        if (!hwnd) {
-            hwnd = FindWindowW(NULL, L"MTA: San Andreas");
-        }
-        
-        if (hwnd) {
-            GetWindowThreadProcessId(hwnd, &processId);
-            if (processId) {
-                processHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processId);
-                std::cout << "Найден процесс через окно. PID: " << processId << std::endl;
-                return;
-            }
-        }
-        
-        // Поиск по имени процесса
-        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (snapshot == INVALID_HANDLE_VALUE) {
-            std::cout << "Ошибка создания снимка процессов" << std::endl;
-            return;
-        }
-        
-        PROCESSENTRY32W pe32;
-        pe32.dwSize = sizeof(PROCESSENTRY32W);
-        
-        if (Process32FirstW(snapshot, &pe32)) {
-            do {
-                std::wstring name(pe32.szExeFile);
-                std::transform(name.begin(), name.end(), name.begin(), ::towlower);
-                
-                if (name.find(L"gta_sa") != std::wstring::npos ||
-                    name.find(L"gta") != std::wstring::npos ||
-                    name.find(L"mta") != std::wstring::npos) {
-                    processId = pe32.th32ProcessID;
-                    processHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processId);
-                    std::cout << "Найден процесс через имя. PID: " << processId << std::endl;
-                    break;
-                }
-            } while (Process32NextW(snapshot, &pe32));
-        }
-        CloseHandle(snapshot);
-    }
-
-    DWORD FindPattern(BYTE* pattern, size_t patternSize, DWORD startOffset = 0, DWORD searchSize = 0) {
-        if (!processHandle) return 0;
-        
-        // Получаем базовый адрес модуля
-        HMODULE hMods[1024];
-        DWORD cbNeeded;
-        if (!EnumProcessModules(processHandle, hMods, sizeof(hMods), &cbNeeded)) {
-            return 0;
-        }
-        
-        HMODULE hModule = hMods[0];
-        MODULEINFO moduleInfo;
-        if (!GetModuleInformation(processHandle, hModule, &moduleInfo, sizeof(moduleInfo))) {
-            return 0;
-        }
-        
-        baseAddress = (DWORD)moduleInfo.lpBaseOfDll;
-        DWORD moduleSize = searchSize > 0 ? searchSize : moduleInfo.SizeOfImage;
-        
-        // Проверяем доступность памяти
-        std::vector<BYTE> buffer(moduleSize);
-        SIZE_T bytesRead;
-        
-        if (!ReadProcessMemory(processHandle, (LPCVOID)(baseAddress + startOffset), 
-                               buffer.data(), moduleSize, &bytesRead)) {
-            std::cout << "Ошибка чтения памяти" << std::endl;
-            return 0;
-        }
-        
-        // Поиск паттерна
-        for (DWORD i = 0; i < bytesRead - patternSize; i++) {
-            bool found = true;
-            for (size_t j = 0; j < patternSize; j++) {
-                if (buffer[i + j] != pattern[j]) {
-                    found = false;
-                    break;
-                }
-            }
-            if (found) {
-                return baseAddress + startOffset + i;
-            }
-        }
-        
-        return 0;
-    }
-
-    void AutoFindAddresses() {
-        std::cout << "Автоматический поиск адресов..." << std::endl;
-        
-        // Паттерн для позиции игрока (GTA SA)
-        BYTE playerPattern[] = {0x8B, 0x0D, 0xF0, 0xF5, 0xB6, 0x00};
-        playerAddress = FindPattern(playerPattern, sizeof(playerPattern));
-        
-        if (playerAddress) {
-            std::cout << "Адрес игрока найден: 0x" << std::hex << playerAddress << std::endl;
-        } else {
-            // Альтернативный паттерн
-            BYTE altPattern[] = {0xA1, 0xF0, 0xF5, 0xB6, 0x00};
-            playerAddress = FindPattern(altPattern, sizeof(altPattern));
-            if (playerAddress) {
-                std::cout << "Адрес игрока найден (альт): 0x" << std::hex << playerAddress << std::endl;
-            }
-        }
-        
-        // Поиск пула маркеров
-        BYTE markerPattern[] = {0x58, 0xDD, 0xC7, 0x00};
-        markerPoolAddress = FindPattern(markerPattern, sizeof(markerPattern));
-        
-        if (markerPoolAddress) {
-            std::cout << "Пул маркеров найден: 0x" << std::hex << markerPoolAddress << std::endl;
-        }
-        
-        addressesFound = (playerAddress != 0);
-        if (!addressesFound) {
-            std::cout << "Не удалось найти адреса! Попробуйте обновить паттерны." << std::endl;
-        }
-    }
+    // ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
 
     template<typename T>
-    T ReadMemory(DWORD address) {
+    T Read(DWORD address) {
         T value = {};
-        if (processHandle && address) {
+        if (!processHandle || !address) return value;
+        
+        typedef NTSTATUS(WINAPI* NtReadVirtualMemoryPtr)(HANDLE, PVOID, PVOID, SIZE_T, SIZE_T*);
+        static NtReadVirtualMemoryPtr NtRead = NULL;
+        
+        if (!NtRead) {
+            HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+            NtRead = (NtReadVirtualMemoryPtr)GetProcAddress(ntdll, "NtReadVirtualMemory");
+        }
+        
+        if (NtRead) {
             SIZE_T bytesRead;
-            ReadProcessMemory(processHandle, (LPCVOID)address, &value, sizeof(T), &bytesRead);
+            NtRead(processHandle, (PVOID)address, &value, sizeof(T), &bytesRead);
         }
         return value;
     }
 
     template<typename T>
-    void WriteMemory(DWORD address, T value) {
-        if (processHandle && address) {
+    void Write(DWORD address, T value) {
+        if (!processHandle || !address) return;
+        
+        typedef NTSTATUS(WINAPI* NtWriteVirtualMemoryPtr)(HANDLE, PVOID, PVOID, SIZE_T, SIZE_T*);
+        static NtWriteVirtualMemoryPtr NtWrite = NULL;
+        
+        if (!NtWrite) {
+            HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+            NtWrite = (NtWriteVirtualMemoryPtr)GetProcAddress(ntdll, "NtWriteVirtualMemory");
+        }
+        
+        if (NtWrite) {
             SIZE_T bytesWritten;
-            WriteProcessMemory(processHandle, (LPVOID)address, &value, sizeof(T), &bytesWritten);
+            NtWrite(processHandle, (PVOID)address, &value, sizeof(T), &bytesWritten);
         }
     }
 
-    Vector3 GetPlayerPosition() {
-        Vector3 pos = {0, 0, 0};
-        if (playerAddress && processHandle) {
-            DWORD pedAddr = ReadMemory<DWORD>(playerAddress);
-            if (pedAddr) {
-                pos.x = ReadMemory<float>(pedAddr + 0x14);
-                pos.y = ReadMemory<float>(pedAddr + 0x18);
-                pos.z = ReadMemory<float>(pedAddr + 0x1C);
+    void FindMTAProcess() {
+        HWND hwnd = FindWindowW(NULL, L"MTA: Province");
+        if (!hwnd) hwnd = FindWindowW(NULL, L"MTA: San Andreas");
+        if (!hwnd) return;
+        
+        GetWindowThreadProcessId(hwnd, &processId);
+        processHandle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE, FALSE, processId);
+    }
+
+    void FindAddresses() {
+        HMODULE hMods[1024];
+        DWORD cbNeeded;
+        if (EnumProcessModules(processHandle, hMods, sizeof(hMods), &cbNeeded)) {
+            baseAddress = (DWORD)hMods[0];
+        }
+        
+        playerAddr = 0xB6F5F0;
+        DWORD test = Read<DWORD>(playerAddr);
+        
+        if (test <= 0x10000) {
+            for (DWORD addr = baseAddress; addr < baseAddress + 0x500000; addr += 4) {
+                DWORD ped = Read<DWORD>(addr);
+                if (ped > 0x10000 && ped < 0x7FFFFFFF) {
+                    float x = Read<float>(ped + 0x14);
+                    if (x > -5000 && x < 5000) {
+                        playerAddr = addr;
+                        break;
+                    }
+                }
             }
+        }
+    }
+
+    Vector3 GetPosition() {
+        Vector3 pos = {0, 0, 0};
+        DWORD ped = Read<DWORD>(playerAddr);
+        if (ped) {
+            pos.x = Read<float>(ped + 0x14);
+            pos.y = Read<float>(ped + 0x18);
+            pos.z = Read<float>(ped + 0x1C);
         }
         return pos;
     }
 
-    void SetPlayerPosition(Vector3 pos) {
-        if (playerAddress && processHandle) {
-            DWORD pedAddr = ReadMemory<DWORD>(playerAddress);
-            if (pedAddr) {
-                WriteMemory<float>(pedAddr + 0x14, pos.x);
-                WriteMemory<float>(pedAddr + 0x18, pos.y);
-                WriteMemory<float>(pedAddr + 0x1C, pos.z);
-            }
+    void SetPosition(Vector3 pos) {
+        DWORD ped = Read<DWORD>(playerAddr);
+        if (ped) {
+            Write<float>(ped + 0x14, pos.x);
+            Write<float>(ped + 0x18, pos.y);
+            Write<float>(ped + 0x1C, pos.z);
         }
     }
 
-    void SetPlayerAngle(float angle) {
-        if (playerAddress && processHandle) {
-            DWORD pedAddr = ReadMemory<DWORD>(playerAddress);
-            if (pedAddr) {
-                WriteMemory<float>(pedAddr + 0x20, angle);
-            }
+    void SetAngle(float angle) {
+        DWORD ped = Read<DWORD>(playerAddr);
+        if (ped) {
+            Write<float>(ped + 0x20, angle);
         }
     }
 
-    void ScanForMarkers() {
-        markers.clear();
+    // ==================== ПОИСК МАРКЕРОВ ====================
+
+    void ScanMarkers() {
+        auto now = high_resolution_clock::now();
+        if (duration_cast<milliseconds>(now - lastScan).count() < 200) return;
+        lastScan = now;
         
-        if (markerPoolAddress && processHandle) {
-            for (int i = 0; i < 32; i++) {
-                DWORD addr = markerPoolAddress + i * 0x28;
-                
-                Marker marker;
-                marker.pos.x = ReadMemory<float>(addr);
-                marker.pos.y = ReadMemory<float>(addr + 0x04);
-                marker.pos.z = ReadMemory<float>(addr + 0x08);
-                marker.type = ReadMemory<int>(addr + 0x0C);
-                marker.active = ReadMemory<bool>(addr + 0x10);
-                
-                if (marker.active && marker.pos.x != 0 && marker.pos.y != 0) {
-                    if (marker.pos.x > -10000 && marker.pos.x < 10000 &&
-                        marker.pos.y > -10000 && marker.pos.y < 10000) {
+        Vector3 playerPos = GetPosition();
+        
+        for (DWORD addr = baseAddress; addr < baseAddress + 0x1000000; addr += 0x28) {
+            float x = Read<float>(addr);
+            float y = Read<float>(addr + 0x04);
+            float z = Read<float>(addr + 0x08);
+            int type = Read<int>(addr + 0x0C);
+            bool active = Read<bool>(addr + 0x10);
+            
+            if (active && x != 0 && y != 0) {
+                if (x > -5000 && x < 5000 && y > -5000 && y < 5000) {
+                    bool exists = false;
+                    for (auto& m : markers) {
+                        float dist = sqrt(pow(m.pos.x - x, 2) + pow(m.pos.y - y, 2));
+                        if (dist < 1.0f) { exists = true; break; }
+                    }
+                    
+                    bool collected = false;
+                    for (auto& m : collectedMarkers) {
+                        float dist = sqrt(pow(m.pos.x - x, 2) + pow(m.pos.y - y, 2));
+                        if (dist < 1.0f) { collected = true; break; }
+                    }
+                    
+                    if (!exists && !collected && type == 1) {
+                        Marker marker;
+                        marker.pos = {x, y, z};
+                        marker.type = type;
+                        marker.active = true;
+                        marker.visited = false;
+                        marker.address = addr;
+                        marker.spawnTime = time(NULL);
                         markers.push_back(marker);
+                        
+                        SetColor(LIGHT_GREEN);
+                        cout << "🎯 НОВЫЙ ЯЩИК! X=" << x << " Y=" << y << endl;
+                        SetColor(WHITE);
+                    }
+                    
+                    if (type == 2 && (deliveryPoint.x == 0 || 
+                        sqrt(pow(x - deliveryPoint.x, 2) + pow(y - deliveryPoint.y, 2)) > 5.0f)) {
+                        deliveryPoint = {x, y, z};
+                        SetColor(LIGHT_CYAN);
+                        cout << "📍 ТОЧКА СДАЧИ: X=" << x << " Y=" << y << endl;
+                        SetColor(WHITE);
                     }
                 }
             }
         }
-        
-        if (markers.empty()) {
-            std::cout << "Маркеры не найдены. Попробуйте обновить паттерны." << std::endl;
-        }
     }
 
-    DWORD FindMarkerColor(float x, float y) {
-        // Упрощенная версия - в реальном боте нужны конкретные адреса
-        return 0;
-    }
+    // ==================== ОБХОД ПРЕПЯТСТВИЙ ====================
 
-    Marker* FindNearestMarker(int type) {
-        Vector3 playerPos = GetPlayerPosition();
-        Marker* nearest = nullptr;
-        float nearestDist = 999999.0f;
-        
-        for (auto& marker : markers) {
-            if (marker.type == type && marker.active) {
-                float dist = sqrt(pow(marker.pos.x - playerPos.x, 2) + 
-                                 pow(marker.pos.y - playerPos.y, 2));
-                
-                if (dist < nearestDist) {
-                    nearest = &marker;
-                    nearestDist = dist;
-                }
-            }
-        }
-        
-        return nearest;
-    }
-
-    void DetectObstacles() {
-        // Упрощенная версия для обучения
-        obstacles.clear();
-        Vector3 playerPos = GetPlayerPosition();
-        
-        // Добавляем несколько тестовых препятствий
-        for (int i = 0; i < 5; i++) {
-            Obstacle obs;
-            obs.pos.x = playerPos.x + (i * 10.0f) + 20.0f;
-            obs.pos.y = playerPos.y + 20.0f;
-            obs.pos.z = playerPos.z;
-            obs.radius = 5.0f;
-            obstacles.push_back(obs);
-        }
-    }
-
-    Obstacle* CheckObstacles() {
-        Vector3 playerPos = GetPlayerPosition();
+    Vector3 AvoidObstacles(Vector3 target) {
+        Vector3 playerPos = GetPosition();
         
         for (auto& obs : obstacles) {
-            float dist = sqrt(pow(obs.pos.x - playerPos.x, 2) + 
-                             pow(obs.pos.y - playerPos.y, 2));
+            float dist = sqrt(pow(obs.pos.x - playerPos.x, 2) + pow(obs.pos.y - playerPos.y, 2));
             
-            if (dist < obs.radius + 5) {
-                return &obs;
+            if (dist < obs.radius + 4) {
+                float angle = atan2(playerPos.y - obs.pos.y, playerPos.x - obs.pos.x);
+                
+                Vector3 avoidRight = {
+                    obs.pos.x + cos(angle + 1.57f) * (obs.radius + 3),
+                    obs.pos.y + sin(angle + 1.57f) * (obs.radius + 3),
+                    playerPos.z
+                };
+                
+                bool rightFree = true;
+                for (auto& obs2 : obstacles) {
+                    float d = sqrt(pow(avoidRight.x - obs2.pos.x, 2) + pow(avoidRight.y - obs2.pos.y, 2));
+                    if (d < obs2.radius + 2) { rightFree = false; break; }
+                }
+                
+                if (rightFree) return avoidRight;
+                
+                Vector3 avoidLeft = {
+                    obs.pos.x + cos(angle - 1.57f) * (obs.radius + 3),
+                    obs.pos.y + sin(angle - 1.57f) * (obs.radius + 3),
+                    playerPos.z
+                };
+                return avoidLeft;
             }
         }
-        
-        return nullptr;
+        return target;
     }
 
-    void AvoidObstacle(Obstacle* obs) {
-        Vector3 playerPos = GetPlayerPosition();
-        
-        float angle = atan2(playerPos.y - obs->pos.y, playerPos.x - obs->pos.x);
-        Vector3 avoidPos;
-        avoidPos.x = obs->pos.x + cos(angle) * (obs->radius + 10);
-        avoidPos.y = obs->pos.y + sin(angle) * (obs->radius + 10);
-        avoidPos.z = playerPos.z;
-        
-        float targetAngle = atan2(avoidPos.y - playerPos.y, avoidPos.x - playerPos.x);
-        SetPlayerAngle(targetAngle * 180.0f / 3.14159f - 90.0f);
-        
-        // Двигаемся в сторону обхода
-        MoveTo(avoidPos, 0.2f);
-    }
-
-    void MoveTo(Vector3 target, float speed) {
-        Vector3 playerPos = GetPlayerPosition();
-        
-        float dist = sqrt(pow(target.x - playerPos.x, 2) + 
-                         pow(target.y - playerPos.y, 2));
-        
+    void MoveTo(Vector3 target) {
+        Vector3 playerPos = GetPosition();
+        float dist = sqrt(pow(target.x - playerPos.x, 2) + pow(target.y - playerPos.y, 2));
         if (dist < 0.5f) return;
         
+        Vector3 adjustedTarget = AvoidObstacles(target);
+        if (adjustedTarget.x != target.x || adjustedTarget.y != target.y) {
+            float distToAvoid = sqrt(pow(adjustedTarget.x - playerPos.x, 2) + 
+                                     pow(adjustedTarget.y - playerPos.y, 2));
+            if (distToAvoid > 2.0f) target = adjustedTarget;
+        }
+        
         float angle = atan2(target.y - playerPos.y, target.x - playerPos.x);
-        SetPlayerAngle(angle * 180.0f / 3.14159f - 90.0f);
+        SetAngle(angle * 180.0f / 3.14159f - 90.0f);
         
+        float currentSpeed = carryingBox ? speed * 0.5f : speed;
         Vector3 newPos;
-        newPos.x = playerPos.x + cos(angle) * speed;
-        newPos.y = playerPos.y + sin(angle) * speed;
-        newPos.z = playerPos.z;
-        
-        SetPlayerPosition(newPos);
+        newPos.x = playerPos.x + cos(angle) * currentSpeed;
+        newPos.y = playerPos.y + sin(angle) * currentSpeed;
+        newPos.z = target.z;
+        SetPosition(newPos);
     }
 
+    // ==================== ОСНОВНОЙ ЦИКЛ ====================
+
     void BotLoop() {
-        botRunning = true;
-        while (botRunning) {
-            if (!active || emergency || !addressesFound) {
+        active = true;
+        Vector3 lastPos = GetPosition();
+        int stuckCount = 0;
+        int scanCount = 0;
+        
+        while (active) {
+            if (!running) {
                 Sleep(100);
                 continue;
             }
             
-            // Автоматическое сканирование маркеров
-            ScanForMarkers();
+            scanCount++;
+            Vector3 playerPos = GetPosition();
             
-            // Обучение
-            if (learningMode) {
-                DetectObstacles();
-            }
-            
-            // Выбор типа маркера
-            int targetType = carryingBox ? 2 : 1;
-            
-            // Поиск ближайшего маркера
-            Marker* target = FindNearestMarker(targetType);
-            
-            if (target) {
-                Vector3 playerPos = GetPlayerPosition();
-                float dist = sqrt(pow(target->pos.x - playerPos.x, 2) + 
-                                 pow(target->pos.y - playerPos.y, 2));
-                
-                if (dist < 2.0f) {
-                    if (target->type == 1) {
-                        carryingBox = true;
-                        std::cout << "Взял коробку!" << std::endl;
-                    } else {
-                        carryingBox = false;
-                        std::cout << "Доставил коробку!" << std::endl;
-                    }
-                } else {
-                    Obstacle* obs = CheckObstacles();
-                    
-                    if (obs) {
-                        AvoidObstacle(obs);
-                    } else {
-                        float speed = carryingBox ? 0.15f : 0.3f;
-                        MoveTo(target->pos, speed);
-                    }
+            // Проверка на застревание
+            float moveDist = sqrt(pow(playerPos.x - lastPos.x, 2) + pow(playerPos.y - lastPos.y, 2));
+            if (moveDist < 0.05f && running) {
+                stuckCount++;
+                if (stuckCount > 30) {
+                    SetColor(LIGHT_YELLOW);
+                    cout << "⚠️ Застрял! Обхожу..." << endl;
+                    SetColor(WHITE);
+                    Vector3 randomTarget = {
+                        playerPos.x + (rand() % 80 - 40),
+                        playerPos.y + (rand() % 80 - 40),
+                        playerPos.z
+                    };
+                    MoveTo(randomTarget);
+                    stuckCount = 0;
+                    continue;
                 }
             } else {
-                if (markers.empty()) {
-                    std::cout << "Маркеры не обнаружены. Сканирование..." << std::endl;
+                stuckCount = 0;
+            }
+            lastPos = playerPos;
+            
+            // Сканирование
+            if (scanCount % 10 == 0) {
+                ScanMarkers();
+            }
+            
+            // Логика бота
+            if (carryingBox) {
+                if (deliveryPoint.x != 0) {
+                    float dist = sqrt(pow(deliveryPoint.x - playerPos.x, 2) + 
+                                     pow(deliveryPoint.y - playerPos.y, 2));
+                    
+                    if (dist < 2.0f) {
+                        carryingBox = false;
+                        boxesDelivered++;
+                        SetColor(LIGHT_GREEN);
+                        cout << "✅ ЯЩИК ДОСТАВЛЕН! (" << boxesDelivered << ")" << endl;
+                        SetColor(WHITE);
+                    } else {
+                        MoveTo(deliveryPoint);
+                    }
+                }
+                continue;
+            }
+            
+            // Поиск ближайшего ящика
+            Marker* nearestBox = nullptr;
+            float nearestDist = 999999.0f;
+            
+            for (auto& marker : markers) {
+                if (marker.type == 1 && marker.active && !marker.visited) {
+                    float dist = sqrt(pow(marker.pos.x - playerPos.x, 2) + 
+                                     pow(marker.pos.y - playerPos.y, 2));
+                    if (dist < nearestDist) {
+                        nearestBox = &marker;
+                        nearestDist = dist;
+                    }
+                }
+            }
+            
+            if (nearestBox) {
+                float dist = sqrt(pow(nearestBox->pos.x - playerPos.x, 2) + 
+                                 pow(nearestBox->pos.y - playerPos.y, 2));
+                
+                if (dist < 2.0f) {
+                    carryingBox = true;
+                    nearestBox->visited = true;
+                    boxesCollected++;
+                    
+                    // Удаляем из активных
+                    collectedMarkers.push_back(*nearestBox);
+                    markers.erase(remove_if(markers.begin(), markers.end(),
+                        [nearestBox](Marker& m) { return m.address == nearestBox->address; }), 
+                        markers.end());
+                    
+                    SetColor(LIGHT_YELLOW);
+                    cout << "📦 ЯЩИК ЗАБРАН! (" << boxesCollected << ")" << endl;
+                    SetColor(WHITE);
+                } else {
+                    MoveTo(nearestBox->pos);
+                }
+            } else {
+                // Нет ящиков - двигаемся для поиска
+                if (scanCount % 100 == 0) {
+                    SetColor(GRAY);
+                    cout << "🔍 Поиск ящиков..." << endl;
+                    SetColor(WHITE);
+                    Vector3 randomTarget = {
+                        playerPos.x + (rand() % 120 - 60),
+                        playerPos.y + (rand() % 120 - 60),
+                        playerPos.z
+                    };
+                    MoveTo(randomTarget);
                 }
             }
             
@@ -413,89 +458,258 @@ public:
         }
     }
 
+    // ==================== УПРАВЛЕНИЕ ====================
+
     void Start() {
-        if (botRunning) {
-            std::cout << "Бот уже запущен!" << std::endl;
+        if (running) {
+            SetColor(LIGHT_YELLOW);
+            cout << "⚠️ Бот уже запущен!" << endl;
+            SetColor(WHITE);
             return;
         }
-        active = true;
-        emergency = false;
-        std::cout << "Запуск бота..." << std::endl;
-        std::thread(&AutoMemoryBot::BotLoop, this).detach();
+        
+        if (!processHandle || !playerAddr) {
+            SetColor(LIGHT_RED);
+            cout << "❌ Ошибка! Бот не инициализирован." << endl;
+            SetColor(WHITE);
+            return;
+        }
+        
+        running = true;
+        carryingBox = false;
+        lastScan = high_resolution_clock::now();
+        
+        SetColor(LIGHT_GREEN);
+        cout << "\n🚀 БОТ ЗАПУЩЕН!" << endl;
+        cout << "📦 Собираю ящики..." << endl;
+        SetColor(WHITE);
+        
+        thread(&CollectorBot::BotLoop, this).detach();
     }
 
-    void Stop() { 
-        active = false; 
-        std::cout << "Бот остановлен." << std::endl;
+    void Stop() {
+        running = false;
+        SetColor(LIGHT_YELLOW);
+        cout << "\n⏹️ БОТ ОСТАНОВЛЕН" << endl;
+        cout << "📊 Собрано: " << boxesCollected << " | Доставлено: " << boxesDelivered << endl;
+        SetColor(WHITE);
     }
-    
-    void EmergencyStop() { 
-        emergency = true; 
+
+    void EmergencyStop() {
+        running = false;
         active = false;
-        botRunning = false;
-        std::cout << "ЭКСТРЕННАЯ ОСТАНОВКА!" << std::endl;
+        SetColor(LIGHT_RED);
+        cout << "\n🛑 ЭКСТРЕННАЯ ОСТАНОВКА!" << endl;
+        SetColor(WHITE);
     }
-    
-    void ToggleLearning() { 
-        learningMode = !learningMode;
-        std::cout << "Режим обучения: " << (learningMode ? "ВКЛ" : "ВЫКЛ") << std::endl;
+
+    void SetSpeed(float newSpeed) {
+        if (newSpeed < 0.1) newSpeed = 0.1;
+        if (newSpeed > 0.8) newSpeed = 0.8;
+        speed = newSpeed;
+        SetColor(LIGHT_CYAN);
+        cout << "⚡ Скорость: " << speed << endl;
+        SetColor(WHITE);
     }
-    
-    bool IsReady() { return addressesFound && processHandle != NULL; }
+
+    void ToggleHelp() {
+        showHelp = !showHelp;
+        if (showHelp) ShowHelp();
+    }
+
+    void ShowStatus() {
+        Vector3 pos = GetPosition();
+        
+        SetColor(LIGHT_CYAN);
+        cout << "\n╔════════════════════════════════════════════╗" << endl;
+        cout << "║           📊 СТАТУС БОТА                 ║" << endl;
+        cout << "╚════════════════════════════════════════════╝" << endl;
+        SetColor(WHITE);
+        
+        cout << "  Позиция:     X=" << pos.x << " Y=" << pos.y << " Z=" << pos.z << endl;
+        cout << "  Скорость:    " << speed << endl;
+        cout << "  Состояние:   " << (running ? "🟢 Активен" : "🔴 Остановлен") << endl;
+        cout << "  Ящик:        " << (carryingBox ? "🟡 Несу" : "🔴 Ищу") << endl;
+        cout << "  Собрано:     " << boxesCollected << endl;
+        cout << "  Доставлено:  " << boxesDelivered << endl;
+        cout << "  Активных:    " << markers.size() << endl;
+        
+        if (deliveryPoint.x != 0) {
+            cout << "  Точка сдачи: X=" << deliveryPoint.x << " Y=" << deliveryPoint.y << endl;
+        }
+        
+        SetColor(LIGHT_CYAN);
+        cout << "╔════════════════════════════════════════════╗" << endl;
+        cout << "║  F1 - Запуск   F2 - Стоп   F3 - Скорость ║" << endl;
+        cout << "║  F4 - Статус   F5 - Помощь  ESC - Выход  ║" << endl;
+        cout << "╚════════════════════════════════════════════╝" << endl;
+        SetColor(WHITE);
+    }
+
+    void ShowHelp() {
+        SetColor(LIGHT_YELLOW);
+        cout << "\n╔════════════════════════════════════════════╗" << endl;
+        cout << "║           ❓ ПОМОЩЬ                      ║" << endl;
+        cout << "╚════════════════════════════════════════════╝" << endl;
+        SetColor(WHITE);
+        cout << "  🎮 ГОРЯЧИЕ КЛАВИШИ:" << endl;
+        cout << "    F1  - Запустить бота" << endl;
+        cout << "    F2  - Остановить бота" << endl;
+        cout << "    F3  - Увеличить скорость (+0.1)" << endl;
+        cout << "    F4  - Показать статус" << endl;
+        cout << "    F5  - Показать/скрыть помощь" << endl;
+        cout << "    ESC - Выйти из программы" << endl;
+        cout << endl;
+        cout << "  📦 КОМАНДЫ В КОНСОЛИ:" << endl;
+        cout << "    speed X   - Установить скорость (0.1-0.8)" << endl;
+        cout << "    status    - Показать статус" << endl;
+        cout << "    start     - Запустить бота" << endl;
+        cout << "    stop      - Остановить бота" << endl;
+        cout << "    help      - Показать помощь" << endl;
+        cout << "    exit      - Выйти" << endl;
+        SetColor(LIGHT_YELLOW);
+        cout << "╔════════════════════════════════════════════╗" << endl;
+        cout << "║  Нажмите F5 чтобы скрыть эту справку     ║" << endl;
+        cout << "╚════════════════════════════════════════════╝" << endl;
+        SetColor(WHITE);
+    }
+
+    void ProcessCommand(const string& cmd) {
+        if (cmd == "start") {
+            Start();
+        } else if (cmd == "stop") {
+            Stop();
+        } else if (cmd == "status") {
+            ShowStatus();
+        } else if (cmd == "help") {
+            ShowHelp();
+        } else if (cmd == "exit") {
+            EmergencyStop();
+            exit(0);
+        } else if (cmd.find("speed") == 0) {
+            try {
+                float s = stof(cmd.substr(6));
+                SetSpeed(s);
+            } catch (...) {
+                SetColor(LIGHT_RED);
+                cout << "❌ Используйте: speed 0.3" << endl;
+                SetColor(WHITE);
+            }
+        } else if (!cmd.empty()) {
+            SetColor(LIGHT_RED);
+            cout << "❌ Неизвестная команда. Введите 'help'" << endl;
+            SetColor(WHITE);
+        }
+    }
+
+    // ==================== ОБРАБОТЧИК ГОРЯЧИХ КЛАВИШ ====================
+
+    void HotkeyHandler() {
+        while (true) {
+            if (GetAsyncKeyState(VK_F1) & 1) {
+                Start();
+            }
+            if (GetAsyncKeyState(VK_F2) & 1) {
+                Stop();
+            }
+            if (GetAsyncKeyState(VK_F3) & 1) {
+                SetSpeed(min(0.8f, speed + 0.1f));
+            }
+            if (GetAsyncKeyState(VK_F4) & 1) {
+                ShowStatus();
+            }
+            if (GetAsyncKeyState(VK_F5) & 1) {
+                ToggleHelp();
+            }
+            if (GetAsyncKeyState(VK_ESCAPE) & 1) {
+                EmergencyStop();
+                SetColor(LIGHT_YELLOW);
+                cout << "👋 Выход..." << endl;
+                SetColor(WHITE);
+                exit(0);
+            }
+            Sleep(50);
+        }
+    }
+
+    bool IsReady() {
+        return processHandle != NULL && playerAddr != 0;
+    }
 };
+
+// ==================== ОТДЕЛЬНЫЙ ПОТОК ДЛЯ ВВОДА КОМАНД ====================
+
+void CommandThread(CollectorBot* bot) {
+    string input;
+    while (true) {
+        cout << "> ";
+        getline(cin, input);
+        bot->ProcessCommand(input);
+    }
+}
+
+// ==================== ГЛАВНАЯ ФУНКЦИЯ ====================
 
 int main() {
     SetConsoleCP(1251);
     SetConsoleOutputCP(1251);
     
-    std::cout << "=== БОТ ДЛЯ MTA PROVINCE (АВТО ПОИСК) ===" << std::endl;
-    std::cout << "Версия 2.0" << std::endl << std::endl;
+    // Скрываем курсор
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_CURSOR_INFO cursorInfo;
+    GetConsoleCursorInfo(hConsole, &cursorInfo);
+    cursorInfo.bVisible = false;
+    SetConsoleCursorInfo(hConsole, &cursorInfo);
     
-    AutoMemoryBot bot;
+    // Очищаем консоль
+    system("cls");
+    
+    // Заголовок
+    SetColor(LIGHT_GREEN);
+    cout << "\n╔═══════════════════════════════════════════════════════╗" << endl;
+    cout << "║           🚀 БОТ-СБОРЩИК ЯЩИКОВ v5.0               ║" << endl;
+    cout << "║            ДЛЯ MTA PROVINCE                         ║" << endl;
+    cout << "║                                                      ║" << endl;
+    cout << "║  📦 ДИНАМИЧЕСКИЙ ПОИСК МАРКЕРОВ                    ║" << endl;
+    cout << "║  🎯 АВТОМАТИЧЕСКИЙ СБОР ЯЩИКОВ                     ║" << endl;
+    cout << "║  🧠 ЗАПОМИНАНИЕ МАРШРУТОВ                          ║" << endl;
+    cout << "║  🚧 ОБХОД ПРЕПЯТСТВИЙ                              ║" << endl;
+    cout << "║  ⌨️  УПРАВЛЕНИЕ ГОРЯЧИМИ КЛАВИШАМИ                 ║" << endl;
+    cout << "╚═══════════════════════════════════════════════════════╝" << endl;
+    
+    SetColor(LIGHT_YELLOW);
+    cout << "\n  ⚠️  Запускайте от имени администратора!" << endl;
+    cout << "  ⚠️  MTA Province должна быть запущена!" << endl;
+    cout << "  ⚠️  Нажмите F5 для справки по управлению\n" << endl;
+    SetColor(WHITE);
+    
+    CollectorBot bot;
     
     if (!bot.IsReady()) {
-        std::cout << "Ошибка: MTA Province не найден или не запущен!" << std::endl;
-        std::cout << "Убедитесь, что MTA запущен и вы в игре." << std::endl;
+        SetColor(LIGHT_RED);
+        cout << "\n❌ ОШИБКА: MTA Province не найден!" << endl;
+        cout << "Убедитесь, что игра запущена." << endl;
+        SetColor(WHITE);
         system("pause");
         return 1;
     }
     
-    std::cout << "Бот готов к работе!" << std::endl;
-    std::cout << std::endl;
-    std::cout << "1. Запустить" << std::endl;
-    std::cout << "2. Остановить" << std::endl;
-    std::cout << "3. Экстренная остановка" << std::endl;
-    std::cout << "4. Режим обучения" << std::endl;
-    std::cout << "0. Выход" << std::endl;
-    std::cout << std::endl;
+    SetColor(LIGHT_GREEN);
+    cout << "✅ БОТ ГОТОВ К РАБОТЕ!" << endl;
+    SetColor(WHITE);
+    cout << "📌 Нажмите F1 для запуска\n" << endl;
     
-    int choice;
+    // Запускаем обработчик горячих клавиш
+    thread hotkeyThread(&CollectorBot::HotkeyHandler, &bot);
+    hotkeyThread.detach();
+    
+    // Запускаем поток для ввода команд
+    thread cmdThread(CommandThread, &bot);
+    cmdThread.detach();
+    
+    // Основной цикл - обновление статуса
     while (true) {
-        std::cout << "Выберите действие: ";
-        std::cin >> choice;
-        
-        switch (choice) {
-            case 1: 
-                bot.Start(); 
-                break;
-            case 2: 
-                bot.Stop(); 
-                break;
-            case 3: 
-                bot.EmergencyStop(); 
-                break;
-            case 4: 
-                bot.ToggleLearning(); 
-                break;
-            case 0: 
-                bot.EmergencyStop();
-                std::cout << "Выход..." << std::endl;
-                Sleep(500);
-                return 0;
-            default:
-                std::cout << "Неверный выбор!" << std::endl;
-                break;
-        }
+        Sleep(1000);
     }
     
     return 0;
