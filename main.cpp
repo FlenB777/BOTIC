@@ -55,7 +55,7 @@ public:
         if (proc) FindAddresses();
     }
 
-    ~Bot() { if (proc) CloseHandle(proc); ReleaseAllKeys(); }
+    ~Bot() { if (proc) CloseHandle(proc); StopAll(); }
 
     template<typename T>
     T Read(DWORD addr) {
@@ -154,7 +154,15 @@ public:
     void PressShift() { if (!shiftPressed && gameWnd) { PostMessage(gameWnd, WM_KEYDOWN, VK_SHIFT, 0); shiftPressed = true; } }
     void ReleaseShift() { if (shiftPressed && gameWnd) { PostMessage(gameWnd, WM_KEYUP, VK_SHIFT, 0); shiftPressed = false; } }
     void PressSpace() { if (gameWnd) { PostMessage(gameWnd, WM_KEYDOWN, VK_SPACE, 0); Sleep(50); PostMessage(gameWnd, WM_KEYUP, VK_SPACE, 0); } }
-    void ReleaseAllKeys() { ReleaseW(); ReleaseS(); ReleaseA(); ReleaseD(); ReleaseShift(); }
+    
+    // ==================== STOP ALL KEYS ====================
+    void StopAll() {
+        ReleaseW();
+        ReleaseS();
+        ReleaseA();
+        ReleaseD();
+        ReleaseShift();
+    }
 
     // ==================== TURN ====================
     void TurnToTarget(Vec3 target) {
