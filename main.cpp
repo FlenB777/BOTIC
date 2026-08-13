@@ -1,4 +1,4 @@
-// main.cpp - MTA Province Collector Bot
+// main.cpp - MTA Province Collector Bot (with SendInput)
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
@@ -92,6 +92,7 @@ public:
             if (proc) {
                 Print("[OK] Process found", 10);
                 SetForegroundWindow(gameWnd);
+                Sleep(500);
                 return;
             }
         }
@@ -140,22 +141,34 @@ public:
         return pos;
     }
 
-    // ==================== KEYS ====================
-    void PressKey(WORD key) { if (gameWnd) { PostMessage(gameWnd, WM_KEYDOWN, key, 0); Sleep(10); } }
-    void ReleaseKey(WORD key) { if (gameWnd) { PostMessage(gameWnd, WM_KEYUP, key, 0); Sleep(10); } }
-    void PressW() { if (!wPressed) { PressKey('W'); wPressed = true; } }
-    void ReleaseW() { if (wPressed) { ReleaseKey('W'); wPressed = false; } }
-    void PressS() { if (!sPressed) { PressKey('S'); sPressed = true; } }
-    void ReleaseS() { if (sPressed) { ReleaseKey('S'); sPressed = false; } }
-    void PressA() { if (!aPressed) { PressKey('A'); aPressed = true; } }
-    void ReleaseA() { if (aPressed) { ReleaseKey('A'); aPressed = false; } }
-    void PressD() { if (!dPressed) { PressKey('D'); dPressed = true; } }
-    void ReleaseD() { if (dPressed) { ReleaseKey('D'); dPressed = false; } }
-    void PressShift() { if (!shiftPressed && gameWnd) { PostMessage(gameWnd, WM_KEYDOWN, VK_SHIFT, 0); shiftPressed = true; } }
-    void ReleaseShift() { if (shiftPressed && gameWnd) { PostMessage(gameWnd, WM_KEYUP, VK_SHIFT, 0); shiftPressed = false; } }
-    void PressSpace() { if (gameWnd) { PostMessage(gameWnd, WM_KEYDOWN, VK_SPACE, 0); Sleep(50); PostMessage(gameWnd, WM_KEYUP, VK_SPACE, 0); } }
+    // ==================== KEYS WITH SendInput ====================
+    void SendKey(WORD key, bool press) {
+        INPUT ip = {0};
+        ip.type = INPUT_KEYBOARD;
+        ip.ki.wVk = key;
+        ip.ki.dwFlags = press ? 0 : KEYEVENTF_KEYUP;
+        SendInput(1, &ip, sizeof(INPUT));
+        Sleep(5);
+    }
+
+    void PressW() { if (!wPressed) { SendKey('W', true); wPressed = true; } }
+    void ReleaseW() { if (wPressed) { SendKey('W', false); wPressed = false; } }
+    void PressS() { if (!sPressed) { SendKey('S', true); sPressed = true; } }
+    void ReleaseS() { if (sPressed) { SendKey('S', false); sPressed = false; } }
+    void PressA() { if (!aPressed) { SendKey('A', true); aPressed = true; } }
+    void ReleaseA() { if (aPressed) { SendKey('A', false); aPressed = false; } }
+    void PressD() { if (!dPressed) { SendKey('D', true); dPressed = true; } }
+    void ReleaseD() { if (dPressed) { SendKey('D', false); dPressed = false; } }
     
-    // ==================== STOP ALL KEYS ====================
+    void PressShift() { if (!shiftPressed) { SendKey(VK_SHIFT, true); shiftPressed = true; } }
+    void ReleaseShift() { if (shiftPressed) { SendKey(VK_SHIFT, false); shiftPressed = false; } }
+    
+    void PressSpace() { 
+        SendKey(VK_SPACE, true);
+        Sleep(30);
+        SendKey(VK_SPACE, false);
+    }
+
     void StopAll() {
         ReleaseW();
         ReleaseS();
@@ -367,7 +380,15 @@ public:
         if (!proc || !playerAddr) { Print("[ERROR] Bot not initialized!", 12); return; }
         running = true; emergency = false; carrying = false; shiftPressed = false;
         lastScan = chrono::high_resolution_clock::now();
-        if (gameWnd) { SetForegroundWindow(gameWnd); Sleep(200); }
+        if (gameWnd) { 
+            SetForegroundWindow(gameWnd);
+            Sleep(500);
+            // Клик в окно чтобы активировать
+            SetCursorPos(100, 100);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            Sleep(200);
+        }
         Print("[START] Bot started! Press F11 for emergency stop.", 10);
         thread(&Bot::BotLoop, this).detach();
     }
