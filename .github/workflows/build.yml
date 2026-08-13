@@ -13,16 +13,18 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       
-    - name: Setup MSVC
-      uses: ilammy/msvc-dev-cmd@v1
-      
+    - name: Setup MinGW
+      uses: egor-tensin/setup-mingw@v2
+      with:
+        platform: x64
+        
     - name: Compile bot
       run: |
-        cl /EHsc /Fe:MTA_Bot.exe main.cpp /link psapi.lib user32.lib
-      
+        g++ -static -O2 -fexec-charset=CP1251 -finput-charset=UTF-8 main.cpp -o MTA_Bot.exe -lpsapi -lstdc++ -luser32 -ladvapi32 -lkernel32
+        
     - name: Upload EXE
       uses: actions/upload-artifact@v4
       with:
-        name: MTA_Bot
-        path: MTA_Bot.exe
+        name: connector
+        path: connector.exe
         retention-days: 30
