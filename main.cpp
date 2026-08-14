@@ -1,4 +1,4 @@
-// main.cpp - MTA Province Collector Bot (keybd_event)
+// main.cpp - MTA Bot (Console Control)
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
@@ -71,18 +71,6 @@ public:
         return val;
     }
 
-    template<typename T>
-    void Write(DWORD addr, T val) {
-        if (!proc || !addr) return;
-        typedef NTSTATUS(WINAPI* NtWrite)(HANDLE, PVOID, PVOID, SIZE_T, SIZE_T*);
-        static NtWrite NtWriteMem = NULL;
-        if (!NtWriteMem) {
-            HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-            NtWriteMem = (NtWrite)GetProcAddress(ntdll, "NtWriteVirtualMemory");
-        }
-        if (NtWriteMem) { SIZE_T written; NtWriteMem(proc, (PVOID)addr, &val, sizeof(T), &written); }
-    }
-
     void FindProcess() {
         gameWnd = FindWindowW(NULL, L"MTA: Province");
         if (!gameWnd) gameWnd = FindWindowW(NULL, L"MTA: San Andreas");
@@ -122,12 +110,19 @@ public:
         if (EnumProcessModules(proc, mods, sizeof(mods), &needed)) baseAddr = (DWORD)mods[0];
         playerAddr = 0xB6F5F0;
         DWORD test = Read<DWORD>(playerAddr);
-        if (test > 0x10000 && test < 0x7FFFFFFF) { Print("[OK] Player address found", 10); return; }
+        if (test > 0x10000 && test < 0x7FFFFFFF) { 
+            Print("[OK] Player address found", 10); 
+            return; 
+        }
         for (DWORD addr = baseAddr; addr < baseAddr + 0x500000; addr += 4) {
             DWORD ped = Read<DWORD>(addr);
             if (ped > 0x10000 && ped < 0x7FFFFFFF) {
                 float x = Read<float>(ped + 0x14), y = Read<float>(ped + 0x18);
-                if (x > -5000 && x < 5000 && y > -5000 && y < 5000) { playerAddr = addr; Print("[OK] Player address found", 10); return; }
+                if (x > -5000 && x < 5000 && y > -5000 && y < 5000) { 
+                    playerAddr = addr; 
+                    Print("[OK] Player address found", 10); 
+                    return; 
+                }
             }
         }
         Print("[ERROR] Failed to find addresses!", 12);
@@ -137,12 +132,34 @@ public:
         Vec3 pos = {0,0,0};
         if (!playerAddr) return pos;
         DWORD ped = Read<DWORD>(playerAddr);
-        if (ped) { pos.x = Read<float>(ped + 0x14); pos.y = Read<float>(ped + 0x18); pos.z = Read<float>(ped + 0x1C); }
+        if (ped && ped > 0x10000 && ped < 0x7FFFFFFF) { 
+            pos.x = Read<float>(ped + 0x14); 
+            pos.y = Read<float>(ped + 0x18); 
+            pos.z = Read<float>(ped + 0x1C); 
+        }
         return pos;
     }
 
-    // ==================== KEYS with keybd_event ====================
+    // ==================== ВНУТРИИГРОВЫЕ КОМАНДЫ ====================
+    void SendCommand(string cmd) {
+        if (!gameWnd) return;
+        
+        // Открываем консоль MTA (обычно ~ или F8)
+        // Отправляем команду через нажатия клавиш
+        // В MTA есть /bind и /unbind
+        
+        // Альтернатива: используем SendMessage для отправки команды
+        COPYDATASTRUCT cds;
+        cds.dwData = 0;
+        cds.cbData = cmd.length() + 1;
+        cds.lpData = (void*)cmd.c_str();
+        
+        SendMessage(gameWnd, WM_COPYDATA, 0, (LPARAM)&cds);
+    }
+
+    // ==================== KEYS ====================
     void SendKey(WORD key, bool press) {
+        // Пытаемся отправить через keybd_event
         keybd_event((BYTE)key, 0, press ? 0 : KEYEVENTF_KEYUP, 0);
         Sleep(10);
     }
@@ -179,7 +196,9 @@ public:
         float angle = atan2(target.y - pos.y, target.x - pos.x);
         float currentAngle = 0;
         DWORD ped = Read<DWORD>(playerAddr);
-        if (ped) currentAngle = Read<float>(ped + 0x20);
+        if (ped && ped > 0x10000 && ped < 0x7FFFFFFF) {
+            currentAngle = Read<float>(ped + 0x20);
+        }
         float diff = angle * 180.0f / 3.14159f - 90.0f - currentAngle;
         while (diff > 180) diff -= 360;
         while (diff < -180) diff += 360;
@@ -194,46 +213,69 @@ public:
         auto now = chrono::high_resolution_clock::now();
         if (duration_cast<milliseconds>(now - lastScan).count() < 300) return;
         lastScan = now;
+        
         Vec3 playerPos = GetPos();
+        if (playerPos.x == 0 && playerPos.y == 0) return;
+        
         for (DWORD addr = baseAddr; addr < baseAddr + 0x800000; addr += 0x28) {
-            float x = Read<float>(addr), y = Read<float>(addr + 4), z = Read<float>(addr + 8);
+            float x = Read<float>(addr);
+            float y = Read<float>(addr + 4);
+            float z = Read<float>(addr + 8);
             int type = Read<int>(addr + 0xC);
             bool active = Read<bool>(addr + 0x10);
-            if (!active || x == 0 || y == 0 || x < -5000 || x > 5000 || y < -5000 || y > 5000) continue;
+            
+            // Фильтр
+            if (!active) continue;
+            if (x < -5000 || x > 5000) continue;
+            if (y < -5000 || y > 5000) continue;
+            if (x == 0 && y == 0) continue;
+            if (x == -2147483648 || y == -2147483648) continue;
+            
             float dist = sqrt(pow(x - playerPos.x, 2) + pow(y - playerPos.y, 2));
             if (dist > 500) continue;
+            
             bool exists = false;
-            for (auto& m : markers) { float d = sqrt(pow(m.pos.x - x, 2) + pow(m.pos.y - y, 2)); if (d < 0.5f) { exists = true; break; } }
+            for (auto& m : markers) {
+                float d = sqrt(pow(m.pos.x - x, 2) + pow(m.pos.y - y, 2));
+                if (d < 1.0f) { exists = true; break; }
+            }
             if (exists) continue;
+            
             bool col = false;
-            for (auto& m : collectedMarkers) { float d = sqrt(pow(m.pos.x - x, 2) + pow(m.pos.y - y, 2)); if (d < 0.5f) { col = true; break; } }
+            for (auto& m : collectedMarkers) {
+                float d = sqrt(pow(m.pos.x - x, 2) + pow(m.pos.y - y, 2));
+                if (d < 1.0f) { col = true; break; }
+            }
             if (col) continue;
-            if (type == 1) { Marker m; m.pos = {x,y,z}; m.type = type; m.active = true; m.collected = false; m.address = addr; m.spawnTime = time(NULL); markers.push_back(m); Print("[BOX] New box! X=" + to_string((int)x) + " Y=" + to_string((int)y), 10); }
-            else if (type == 2) { deliveryPoint = {x,y,z}; Print("[DROP] Drop point! X=" + to_string((int)x) + " Y=" + to_string((int)y), 11); }
-        }
-    }
-
-    // ==================== SCAN OBSTACLES ====================
-    void ScanObstacles() {
-        Vec3 pos = GetPos();
-        for (float x = pos.x - 20; x <= pos.x + 20; x += 2.0f) {
-            for (float y = pos.y - 20; y <= pos.y + 20; y += 2.0f) {
-                for (DWORD addr = baseAddr; addr < baseAddr + 0x100000; addr += 4) {
-                    float memX = Read<float>(addr);
-                    float memY = Read<float>(addr + 4);
-                    float memZ = Read<float>(addr + 8);
-                    if (abs(memX - x) < 1.0f && abs(memY - y) < 1.0f) {
-                        bool exists = false;
-                        for (auto& o : obstacles) { float d = sqrt(pow(o.x - x, 2) + pow(o.y - y, 2)); if (d < 2.0f) { exists = true; break; } }
-                        if (!exists) { Vec3 obs = {x, y, memZ}; obstacles.push_back(obs); Print("[OBSTACLE] Found! X=" + to_string((int)x) + " Y=" + to_string((int)y), 8); }
-                        break;
-                    }
-                }
+            
+            if (type == 1) { 
+                Marker m; 
+                m.pos = {x, y, z}; 
+                m.type = type; 
+                m.active = true; 
+                m.collected = false; 
+                m.address = addr; 
+                m.spawnTime = time(NULL); 
+                markers.push_back(m);
+                Print("[BOX] New box! X=" + to_string((int)x) + " Y=" + to_string((int)y), 10); 
+            }
+            else if (type == 2) { 
+                deliveryPoint = {x, y, z}; 
+                Print("[DROP] Drop point! X=" + to_string((int)x) + " Y=" + to_string((int)y), 11); 
             }
         }
-        vector<Vec3> newObstacles;
-        for (auto& o : obstacles) { float d = sqrt(pow(o.x - pos.x, 2) + pow(o.y - pos.y, 2)); if (d < 30.0f) newObstacles.push_back(o); }
-        obstacles = newObstacles;
+        
+        if (markers.size() > 50) {
+            vector<Marker> cleanMarkers;
+            for (auto& m : markers) {
+                if (m.pos.x > -5000 && m.pos.x < 5000 && 
+                    m.pos.y > -5000 && m.pos.y < 5000 &&
+                    m.pos.x != -2147483648 && m.pos.y != -2147483648) {
+                    cleanMarkers.push_back(m);
+                }
+            }
+            markers = cleanMarkers;
+        }
     }
 
     // ==================== AVOID OBSTACLES ====================
@@ -244,12 +286,7 @@ public:
             if (d < 4.0f) {
                 float angle = atan2(pos.y - o.y, pos.x - o.x);
                 Vec3 right = { o.x + cos(angle + 1.57f) * 5.0f, o.y + sin(angle + 1.57f) * 5.0f, pos.z };
-                bool rightFree = true;
-                for (auto& o2 : obstacles) { float d2 = sqrt(pow(right.x - o2.x, 2) + pow(right.y - o2.y, 2)); if (d2 < 3.0f) { rightFree = false; break; } }
-                if (rightFree) { Print("[AVOID] Go right!", 11); return right; }
-                Vec3 left = { o.x + cos(angle - 1.57f) * 5.0f, o.y + sin(angle - 1.57f) * 5.0f, pos.z };
-                Print("[AVOID] Go left!", 11);
-                return left;
+                return right;
             }
         }
         return target;
@@ -258,8 +295,8 @@ public:
     // ==================== MAIN LOOP ====================
     void BotLoop() {
         active = true;
-        Print("[START] Bot started! Collecting boxes...", 10);
-        Print("[RUN] Sprint + Jump | Avoid obstacles", 11);
+        Print("[START] Bot started! Press F11 for emergency stop.", 10);
+        Print("[RUN] Use WASD + Shift + Space", 11);
         
         int scanCount = 0;
         lastPos = GetPos();
@@ -274,7 +311,7 @@ public:
             scanCount++;
             Vec3 pos = GetPos();
             
-            // Stuck check
+            // Проверка застревания
             float move = sqrt(pow(pos.x - lastPos.x, 2) + pow(pos.y - lastPos.y, 2));
             if (move < 0.05f) {
                 stuckCount++;
@@ -287,13 +324,12 @@ public:
             } else { stuckCount = 0; }
             lastPos = pos;
 
-            // Scan
+            // Сканирование
             if (scanCount % 3 == 0) {
                 ScanMarkers();
-                ScanObstacles();
             }
 
-            // Logic
+            // Логика
             if (carrying) {
                 if (deliveryPoint.x != 0) {
                     float dist = sqrt(pow(deliveryPoint.x - pos.x, 2) + pow(deliveryPoint.y - pos.y, 2));
@@ -310,17 +346,24 @@ public:
                     hasTarget = false; continue;
                 }
             } else {
-                Marker* nearest = nullptr; float nearDist = 999999.0f;
+                Marker* nearest = nullptr; 
+                float nearDist = 999999.0f;
                 for (auto& m : markers) {
                     if (m.type == 1 && !m.collected) {
                         float d = sqrt(pow(m.pos.x - pos.x, 2) + pow(m.pos.y - pos.y, 2));
-                        if (d < nearDist) { nearest = &m; nearDist = d; }
+                        if (d < nearDist && d < 500) { 
+                            nearest = &m; 
+                            nearDist = d; 
+                        }
                     }
                 }
+                
                 if (nearest) {
                     float dist = sqrt(pow(nearest->pos.x - pos.x, 2) + pow(nearest->pos.y - pos.y, 2));
                     if (dist < 2.0f) {
-                        carrying = true; nearest->collected = true; collected++;
+                        carrying = true; 
+                        nearest->collected = true; 
+                        collected++;
                         collectedMarkers.push_back(*nearest);
                         markers.erase(remove_if(markers.begin(), markers.end(),
                             [nearest](Marker& m) { return m.address == nearest->address; }), markers.end());
@@ -329,7 +372,8 @@ public:
                         jumpCounter = 0; hasTarget = false;
                         continue;
                     } else {
-                        targetPos = nearest->pos; hasTarget = true;
+                        targetPos = nearest->pos; 
+                        hasTarget = true;
                     }
                 } else {
                     hasTarget = false;
@@ -337,12 +381,18 @@ public:
                 }
             }
 
-            // ===== MOVE WITH AVOID =====
+            // ===== ДВИЖЕНИЕ =====
             if (hasTarget) {
                 Vec3 posNow = GetPos();
                 float distToTarget = sqrt(pow(targetPos.x - posNow.x, 2) + pow(targetPos.y - posNow.y, 2));
-                if (distToTarget < 2.0f) { hasTarget = false; StopAll(); continue; }
+                
+                if (distToTarget < 2.0f) { 
+                    hasTarget = false; 
+                    StopAll(); 
+                    continue; 
+                }
 
+                // Обход препятствий
                 Vec3 obstacle = AvoidObstacle(targetPos);
                 float obsDist = sqrt(pow(obstacle.x - posNow.x, 2) + pow(obstacle.y - posNow.y, 2));
                 if (obsDist > 2.0f && obsDist < 20.0f) {
@@ -350,12 +400,15 @@ public:
                 }
 
                 TurnToTarget(targetPos);
-                PressW(); ReleaseS();
+                PressW(); 
+                ReleaseS();
                 
                 if (!carrying) {
                     PressShift();
                     jumpCounter++;
-                    if (jumpCounter % 3 == 0 && distToTarget > 3.0f) { PressSpace(); }
+                    if (jumpCounter % 3 == 0 && distToTarget > 3.0f) { 
+                        PressSpace(); 
+                    }
                 } else {
                     ReleaseShift();
                 }
@@ -374,13 +427,22 @@ public:
     void Start() {
         if (running) { Print("[WARN] Bot already running!", 14); return; }
         if (!proc || !playerAddr) { Print("[ERROR] Bot not initialized!", 12); return; }
+        
         running = true; emergency = false; carrying = false; shiftPressed = false;
+        markers.clear();
+        collectedMarkers.clear();
+        obstacles.clear();
         lastScan = chrono::high_resolution_clock::now();
+        
         if (gameWnd) { 
             SetForegroundWindow(gameWnd);
             Sleep(500);
         }
+        
         Print("[START] Bot started! Press F11 for emergency stop.", 10);
+        Print("[INFO] Make sure the game window is ACTIVE!", 11);
+        Print("[INFO] Do NOT minimize the game!", 11);
+        
         thread(&Bot::BotLoop, this).detach();
     }
 
@@ -404,8 +466,9 @@ public:
         cout << "  Delivered:  " << delivered << endl;
         cout << "  Found:      " << markers.size() << " boxes" << endl;
         cout << "  Obstacles:  " << obstacles.size() << endl;
-        cout << "  Keys:       W=Forward A=Left S=Back D=Right" << endl;
-        if (deliveryPoint.x != 0) cout << "  Drop:       X=" << (int)deliveryPoint.x << " Y=" << (int)deliveryPoint.y << endl;
+        if (deliveryPoint.x != 0 && deliveryPoint.x > -5000 && deliveryPoint.x < 5000) {
+            cout << "  Drop:       X=" << (int)deliveryPoint.x << " Y=" << (int)deliveryPoint.y << endl;
+        }
         SetColor(11);
         cout << "========================================" << endl;
         cout << "  F1-Start  F2-Stop  F3-Faster  F4-Slower" << endl;
@@ -435,10 +498,10 @@ public:
         cout << "  D - Right" << endl;
         cout << "  Shift - Sprint (no box)" << endl;
         cout << "  Space - Jump (to box)" << endl;
-        cout << "  Bot finds boxes and avoids obstacles" << endl;
         SetColor(14);
         cout << "========================================" << endl;
-        cout << "  Stealth mode - Anti-cheat safe" << endl;
+        cout << "  IMPORTANT: Game window MUST be active!" << endl;
+        cout << "  DO NOT minimize the game!" << endl;
         cout << "========================================" << endl;
         SetColor(15);
     }
@@ -477,11 +540,12 @@ int main() {
     cout << "  [DROP] Delivers to drop point" << endl;
     cout << "  [AVOID] Scans and avoids obstacles" << endl;
     cout << "  [KEYS] W=Forward A=Left S=Back D=Right" << endl;
-    cout << "  [STEALTH] Anti-cheat safe" << endl;
     cout << "==================================================" << endl;
     SetColor(14);
     cout << "\n  [WARN] Run as Administrator!" << endl;
     cout << "  [WARN] MTA Province must be running!" << endl;
+    cout << "  [WARN] GAME WINDOW MUST BE ACTIVE!" << endl;
+    cout << "  [WARN] DO NOT MINIMIZE THE GAME!" << endl;
     cout << "  [WARN] Press F5 for controls" << endl;
     cout << endl;
     SetColor(15);
