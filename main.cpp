@@ -1,4 +1,4 @@
-// main.cpp - MTA Province Bot (Mouse Turn + Smooth Movement)
+// main.cpp - MTA Province Bot (Smooth A/D Turn)
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
@@ -42,26 +42,20 @@ private:
     Vec3 lastPos;
     bool shiftPressed;
     int jumpCounter;
-    bool wPressed, sPressed;
+    bool wPressed, sPressed, aPressed, dPressed;
     
-    // Для плавного движения
-    float targetAngle;
-    float currentAngle;
-    int smoothCounter;
-    Vec3 lastTargetPos;
-    bool hasLastTarget;
-    POINT lastMousePos;
+    // Для плавного поворота
+    float lastDiff;
+    int turnTimer;
 
 public:
     Bot() : proc(NULL), pid(0), playerAddr(0), baseAddr(0), running(false),
-            active(false), carrying(false), speed(0.25f), collected(0),
+            active(false), carrying(false), speed(0.3f), collected(0),
             delivered(0), emergency(false), stuckCount(0), shiftPressed(false),
-            jumpCounter(0), wPressed(false), sPressed(false),
-            targetAngle(0), currentAngle(0), smoothCounter(0), hasLastTarget(false) {
+            jumpCounter(0), wPressed(false), sPressed(false), aPressed(false), dPressed(false),
+            lastDiff(0), turnTimer(0) {
         deliveryPoint = {0,0,0};
         lastPos = {0,0,0};
-        lastTargetPos = {0,0,0};
-        lastMousePos = {0,0};
         gameWnd = NULL;
         FindProcess();
         if (proc) FindAddresses();
@@ -171,6 +165,10 @@ public:
     void ReleaseW() { if (wPressed) { SendKey('W', false); wPressed = false; } }
     void PressS() { if (!sPressed) { SendKey('S', true); sPressed = true; } }
     void ReleaseS() { if (sPressed) { SendKey('S', false); sPressed = false; } }
+    void PressA() { if (!aPressed) { SendKey('A', true); aPressed = true; } }
+    void ReleaseA() { if (aPressed) { SendKey('A', false); aPressed = false; } }
+    void PressD() { if (!dPressed) { SendKey('D', true); dPressed = true; } }
+    void ReleaseD() { if (dPressed) { SendKey('D', false); dPressed = false; } }
     
     void PressShift() { if (!shiftPressed) { SendKey(VK_SHIFT, true); shiftPressed = true; } }
     void ReleaseShift() { if (shiftPressed) { SendKey(VK_SHIFT, false); shiftPressed = false; } }
@@ -184,59 +182,59 @@ public:
     void StopAll() {
         ReleaseW();
         ReleaseS();
+        ReleaseA();
+        ReleaseD();
         ReleaseShift();
     }
 
-    // ==================== ПОВОРОТ МЫШКОЙ ====================
-    void MoveMouse(int deltaX, int deltaY) {
-        // Получаем текущую позицию мыши
-        POINT currentPos;
-        GetCursorPos(&currentPos);
-        
-        // Если мышь не в игре - центрируем
-        RECT rect;
-        GetWindowRect(gameWnd, &rect);
-        int centerX = (rect.left + rect.right) / 2;
-        int centerY = (rect.top + rect.bottom) / 2;
-        
-        // Если мышь далеко от центра - перемещаем в центр
-        if (abs(currentPos.x - centerX) > 100 || abs(currentPos.y - centerY) > 100) {
-            SetCursorPos(centerX, centerY);
-            currentPos.x = centerX;
-            currentPos.y = centerY;
-        }
-        
-        // Двигаем мышь
-        SetCursorPos(currentPos.x + deltaX, currentPos.y + deltaY);
-        lastMousePos = {currentPos.x + deltaX, currentPos.y + deltaY};
-    }
-
-    void SmoothTurnToTarget(Vec3 target) {
+    // ==================== ПЛАВНЫЙ ПОВОРОТ ====================
+    void SmoothTurn(Vec3 target) {
         Vec3 pos = GetPos();
-        float angle = atan2(target.y - pos.y, target.x - pos.x) * 180.0f / 3.14159f - 90.0f;
+        float targetAngle = atan2(target.y - pos.y, target.x - pos.x) * 180.0f / 3.14159f - 90.0f;
         float currentAngle = GetAngle();
         
-        float diff = angle - currentAngle;
+        float diff = targetAngle - currentAngle;
         while (diff > 180) diff -= 360;
         while (diff < -180) diff += 360;
         
-        // Ограничиваем максимальный поворот за один шаг (плавность)
+        // Ограничиваем скорость поворота (плавность)
         float maxTurn = 6.0f;
         if (abs(diff) > maxTurn) {
             diff = (diff > 0) ? maxTurn : -maxTurn;
         }
         
-        // Добавляем небольшое случайное отклонение (как у игрока)
-        float randomOffset = (rand() % 40 - 20) / 100.0f;
-        diff += randomOffset;
-        
-        // Конвертируем угол в пиксели мыши
-        // В MTA чувствительность мыши примерно 1 градус = 2-3 пикселя
-        int mouseMove = (int)(diff * 2.5f);
-        
-        if (abs(mouseMove) > 1) {
-            MoveMouse(mouseMove, 0);
+        // Добавляем случайное отклонение (реалистичность)
+        if (rand() % 10 == 0) {
+            diff += (rand() % 20 - 10) / 10.0f;
         }
+        
+        // Поворот
+        if (diff > 2.0f) {
+            PressD();
+            ReleaseA();
+            // Микро-паузы для реалистичности
+            turnTimer++;
+            if (turnTimer % 15 == 0) {
+                ReleaseD();
+                Sleep(15);
+                PressD();
+            }
+        } else if (diff < -2.0f) {
+            PressA();
+            ReleaseD();
+            turnTimer++;
+            if (turnTimer % 15 == 0) {
+                ReleaseA();
+                Sleep(15);
+                PressA();
+            }
+        } else {
+            ReleaseA();
+            ReleaseD();
+            turnTimer = 0;
+        }
+        
+        lastDiff = diff;
     }
 
     // ==================== SCAN MARKERS ====================
@@ -415,8 +413,8 @@ public:
             }
         }
         
-        // Плавный поворот мышкой
-        SmoothTurnToTarget(target);
+        // Плавный поворот
+        SmoothTurn(target);
         
         // Движение вперёд
         PressW();
@@ -426,13 +424,13 @@ public:
         if (!carrying) {
             PressShift();
             jumpCounter++;
-            if (jumpCounter % 4 == 0 && dist > 5.0f && rand() % 3 == 0) {
+            if (jumpCounter % 5 == 0 && dist > 5.0f && rand() % 3 == 0) {
                 PressSpace();
             }
-            if (jumpCounter > 20) jumpCounter = 0;
+            if (jumpCounter > 25) jumpCounter = 0;
         } else {
             ReleaseShift();
-            if (jumpCounter % 8 == 0 && dist > 3.0f && rand() % 5 == 0) {
+            if (jumpCounter % 10 == 0 && dist > 3.0f && rand() % 4 == 0) {
                 PressSpace();
             }
         }
@@ -441,8 +439,8 @@ public:
     // ==================== MAIN LOOP ====================
     void BotLoop() {
         active = true;
-        Print("[START] Bot started! Mouse turn enabled.", 10);
-        Print("[RUN] Smooth movement + Obstacle avoidance", 11);
+        Print("[START] Bot started!", 10);
+        Print("[RUN] Smooth A/D turn + obstacle avoidance", 11);
         
         int scanCount = 0;
         lastPos = GetPos();
@@ -461,12 +459,12 @@ public:
             
             // Проверка застревания
             float move = sqrt(pow(pos.x - lastPos.x, 2) + pow(pos.y - lastPos.y, 2));
-            if (move < 0.03f) {
+            if (move < 0.03f && wPressed) {
                 stuckCount++;
                 if (stuckCount > 80) {
                     Print("[WARN] Stuck! Jump and turn...", 14);
                     PressSpace(); Sleep(150); PressSpace();
-                    MoveMouse(-200, 0);
+                    PressA(); Sleep(400); ReleaseA();
                     PressSpace();
                     stuckCount = 0;
                 }
@@ -541,12 +539,12 @@ public:
                     if (moveCounter % 30 == 0) {
                         randomDirection = rand() % 4;
                     }
-                    if (moveCounter % 5 == 0) {
+                    if (moveCounter % 5 == 0 && running) {
                         switch(randomDirection) {
                             case 0: PressW(); ReleaseS(); break;
                             case 1: PressS(); ReleaseW(); break;
-                            case 2: MoveMouse(-20, 0); break;
-                            case 3: MoveMouse(20, 0); break;
+                            case 2: PressA(); Sleep(300); ReleaseA(); break;
+                            case 3: PressD(); Sleep(300); ReleaseD(); break;
                         }
                     }
                     if (moveCounter % 60 == 0) {
@@ -598,14 +596,9 @@ public:
         if (gameWnd) { 
             SetForegroundWindow(gameWnd);
             Sleep(500);
-            // Центрируем мышь в окне игры
-            RECT rect;
-            GetWindowRect(gameWnd, &rect);
-            SetCursorPos((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
         }
         
-        Print("[START] Bot started! Mouse turn enabled.", 10);
-        Print("[INFO] Press F11 for emergency stop.", 14);
+        Print("[START] Bot started! Press F11 for emergency stop.", 10);
         
         thread(&Bot::BotLoop, this).detach();
     }
@@ -630,7 +623,7 @@ public:
         cout << "  Delivered:  " << delivered << endl;
         cout << "  Found:      " << markers.size() << " boxes" << endl;
         cout << "  Obstacles:  " << obstacles.size() << endl;
-        cout << "  Control:    MOUSE TURN (smooth)" << endl;
+        cout << "  Control:    A/D smooth turn" << endl;
         if (deliveryPoint.x != 0 && deliveryPoint.x > -5000 && deliveryPoint.x < 5000) {
             cout << "  Drop:       X=" << (int)deliveryPoint.x << " Y=" << (int)deliveryPoint.y << endl;
         }
@@ -656,17 +649,16 @@ public:
         cout << "  F11 - EMERGENCY STOP" << endl;
         cout << "  ESC - Exit" << endl;
         cout << endl;
-        cout << "  MOVEMENT:" << endl;
+        cout << "  BOT CONTROLS (AUTO):" << endl;
         cout << "  W - Forward" << endl;
-        cout << "  S - Back" << endl;
-        cout << "  MOUSE - Turning (smooth)" << endl;
+        cout << "  A/D - Smooth turn" << endl;
         cout << "  Shift - Sprint (no box)" << endl;
         cout << "  Space - Jump" << endl;
         cout << endl;
         cout << "  FEATURES:" << endl;
-        cout << "  Mouse turn (faster, realistic)" << endl;
-        cout << "  Smooth movement" << endl;
+        cout << "  Smooth turning (A/D)" << endl;
         cout << "  Obstacle avoidance" << endl;
+        cout << "  Realistic movement" << endl;
         SetColor(14);
         cout << "========================================" << endl;
         SetColor(15);
@@ -705,7 +697,7 @@ int main() {
     cout << "  [BOX] Collects boxes" << endl;
     cout << "  [DROP] Delivers to drop point" << endl;
     cout << "  [AVOID] Smart obstacle avoidance" << endl;
-    cout << "  [MOUSE] Mouse turn (faster, realistic)" << endl;
+    cout << "  [TURN] Smooth A/D turn" << endl;
     cout << "  [REAL] Looks like a real player" << endl;
     cout << "==================================================" << endl;
     SetColor(14);
