@@ -1,4 +1,4 @@
-// main.cpp - MTA Bot with Bind System
+// main.cpp - MTA Bot with Bind System (Complete)
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
@@ -92,7 +92,6 @@ private:
     Vec3 lastPos;
     int jumpCounter;
     
-    // Состояние биндов
     bool forwardBound, backBound, leftBound, rightBound, sprintBound;
     
     MemoryCache memoryCache;
@@ -274,7 +273,7 @@ public:
     void SendChatCommand(string cmd) {
         if (!gameWnd) return;
         
-        // Открываем консоль (T или F6)
+        // Открываем консоль
         PostMessage(gameWnd, WM_KEYDOWN, 'T', 0);
         Sleep(50);
         PostMessage(gameWnd, WM_KEYUP, 'T', 0);
@@ -309,7 +308,6 @@ public:
     void SetupBinds() {
         Print("[BINDS] Setting up movement binds...", 11);
         
-        // Привязываем клавиши через консоль
         SendChatCommand("bind w forward");
         Sleep(200);
         SendChatCommand("bind s back");
@@ -337,7 +335,6 @@ public:
         
         Print("[BINDS] Cleaning up binds...", 11);
         
-        // Удаляем бинды
         SendChatCommand("unbind w");
         Sleep(200);
         SendChatCommand("unbind s");
@@ -360,11 +357,10 @@ public:
         Print("[BINDS] Binds cleaned up!", 10);
     }
 
-    // ==================== УПРАВЛЕНИЕ ДВИЖЕНИЕМ ЧЕРЕЗ БИНДЫ ====================
+    // ==================== УПРАВЛЕНИЕ ДВИЖЕНИЕМ ====================
     void SetControlState(string control, bool state) {
         if (!gameWnd) return;
         
-        // Используем команды MTA для управления
         if (state) {
             if (control == "forward") SendChatCommand("setControlState forward true");
             else if (control == "back") SendChatCommand("setControlState back true");
@@ -406,7 +402,7 @@ public:
         ReleaseSprint();
     }
 
-    // ==================== УЛУЧШЕННЫЙ ПОВОРОТ ====================
+    // ==================== ПОВОРОТ ====================
     void TurnToTarget(Vec3 target) {
         Vec3 pos = GetPos();
         float angle = atan2(target.y - pos.y, target.x - pos.x);
@@ -439,7 +435,7 @@ public:
         currentAngleDiff = diff;
     }
 
-    // ==================== SCAN MARKERS ====================
+    // ==================== СКАНИРОВАНИЕ МАРКЕРОВ ====================
     void ScanMarkers() {
         if (!proc || !baseAddr) return;
         auto now = chrono::high_resolution_clock::now();
@@ -577,7 +573,7 @@ public:
         return result;
     }
 
-    // ==================== MAIN LOOP ====================
+    // ==================== ГЛАВНЫЙ ЦИКЛ ====================
     void BotLoop() {
         active = true;
         Print("[START] Bot started! Press F11 for emergency stop.", 10);
@@ -595,7 +591,6 @@ public:
             scanCount++;
             Vec3 pos = GetPos();
             
-            // Проверка застревания
             float move = sqrt(pow(pos.x - lastPos.x, 2) + pow(pos.y - lastPos.y, 2));
             if (move < 0.05f && hasTarget) {
                 stuckCount++;
@@ -631,12 +626,10 @@ public:
             }
             lastPos = pos;
 
-            // Сканирование
             if (scanCount % 3 == 0) {
                 ScanMarkers();
             }
 
-            // Логика
             if (carrying) {
                 if (deliveryPoint.x != 0) {
                     float dist = sqrt(pow(deliveryPoint.x - pos.x, 2) + pow(deliveryPoint.y - pos.y, 2));
@@ -690,7 +683,6 @@ public:
                 }
             }
 
-            // Движение
             if (hasTarget) {
                 Vec3 posNow = GetPos();
                 float distToTarget = sqrt(pow(targetPos.x - posNow.x, 2) + pow(targetPos.y - posNow.y, 2));
@@ -779,12 +771,15 @@ public:
             Sleep(30);
         }
         
-        // Очистка при выходе из цикла
         StopAll();
         CleanupBinds();
     }
 
-    void Print(string text, int color = 15) { SetColor(color); cout << text << endl; SetColor(15); }
+    void Print(string text, int color = 15) { 
+        SetColor(color); 
+        cout << text << endl; 
+        SetColor(15); 
+    }
 
     void Start() {
         if (running) { Print("[WARN] Bot already running!", 14); return; }
@@ -806,7 +801,6 @@ public:
             Sleep(500);
         }
         
-        // Настраиваем бинды перед запуском
         SetupBinds();
         Sleep(1000);
         
@@ -911,4 +905,13 @@ int main() {
     cout << "==================================================" << endl;
     SetColor(14);
     cout << "\n  [WARN] Run as Administrator!" << endl;
-    cout << "  [WARN] MTA Province
+    cout << "  [WARN] MTA Province must be running!" << endl;
+    cout << "  [WARN] Press F1 to start bot" << endl;
+    cout << "  [WARN] Press F5 for status" << endl;
+    cout << endl;
+    SetColor(15);
+
+    Bot bot;
+    if (!bot.Ready()) {
+        SetColor(12);
+        cout << "\n[ERROR] MTA Province
