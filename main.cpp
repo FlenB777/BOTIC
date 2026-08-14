@@ -1,4 +1,4 @@
-// main.cpp - MTA Bot with Bind System (Complete Fixed)
+// main.cpp - MTA Bot with Bind System (Complete)
 #define _USE_MATH_DEFINES
 #include <windows.h>
 #include <tlhelp32.h>
@@ -58,7 +58,7 @@ public:
         }
         
         SIZE_T bytesRead;
-        if (ReadProcessMemory(proc, (LPCVOID)address, &value, sizeof(T), &bytesRead)) {
+        if (ReadProcessMemory(proc, (LPCVOID)(DWORD64)address, &value, sizeof(T), &bytesRead)) {
             if (bytesRead == sizeof(T)) {
                 CacheEntry entry;
                 entry.address = address;
@@ -72,9 +72,7 @@ public:
         return false;
     }
     
-    void Clear() {
-        cache.clear();
-    }
+    void Clear() { cache.clear(); }
 };
 
 class Bot {
@@ -138,27 +136,12 @@ public:
         
         if (useCache) {
             lock_guard<mutex> lock(memoryMutex);
-            if (memoryCache.ReadCached(proc, addr, val)) {
-                return val;
-            }
+            if (memoryCache.ReadCached(proc, addr, val)) return val;
         }
         
         SIZE_T bytesRead;
         if (ReadProcessMemory(proc, (LPCVOID)(DWORD64)addr, &val, sizeof(T), &bytesRead)) {
-            if (bytesRead == sizeof(T)) {
-                return val;
-            }
-        }
-        
-        typedef NTSTATUS(WINAPI* NtRead)(HANDLE, PVOID, PVOID, SIZE_T, SIZE_T*);
-        static NtRead NtReadMem = NULL;
-        if (!NtReadMem) {
-            HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-            NtReadMem = (NtRead)GetProcAddress(ntdll, "NtReadVirtualMemory");
-        }
-        if (NtReadMem) { 
-            SIZE_T read; 
-            NtReadMem(proc, (PVOID)(DWORD64)addr, &val, sizeof(T), &read); 
+            if (bytesRead == sizeof(T)) return val;
         }
         return val;
     }
@@ -275,7 +258,6 @@ public:
         return pos;
     }
 
-    // ==================== СИСТЕМА БИНДОВ ====================
     void SendChatCommand(string cmd) {
         if (!gameWnd) return;
         
@@ -359,41 +341,20 @@ public:
         Print("[BINDS] Binds cleaned up!", 10);
     }
 
-    // ==================== УПРАВЛЕНИЕ ДВИЖЕНИЕМ ====================
-    void SetControlState(string control, bool state) {
-        if (!gameWnd) return;
-        
-        if (state) {
-            if (control == "forward") SendChatCommand("setControlState forward true");
-            else if (control == "back") SendChatCommand("setControlState back true");
-            else if (control == "left") SendChatCommand("setControlState left true");
-            else if (control == "right") SendChatCommand("setControlState right true");
-            else if (control == "sprint") SendChatCommand("setControlState sprint true");
-            else if (control == "jump") SendChatCommand("setControlState jump true");
-        } else {
-            if (control == "forward") SendChatCommand("setControlState forward false");
-            else if (control == "back") SendChatCommand("setControlState back false");
-            else if (control == "left") SendChatCommand("setControlState left false");
-            else if (control == "right") SendChatCommand("setControlState right false");
-            else if (control == "sprint") SendChatCommand("setControlState sprint false");
-            else if (control == "jump") SendChatCommand("setControlState jump false");
-        }
-    }
-
-    void PressForward() { SetControlState("forward", true); }
-    void ReleaseForward() { SetControlState("forward", false); }
-    void PressBack() { SetControlState("back", true); }
-    void ReleaseBack() { SetControlState("back", false); }
-    void PressLeft() { SetControlState("left", true); }
-    void ReleaseLeft() { SetControlState("left", false); }
-    void PressRight() { SetControlState("right", true); }
-    void ReleaseRight() { SetControlState("right", false); }
-    void PressSprint() { SetControlState("sprint", true); }
-    void ReleaseSprint() { SetControlState("sprint", false); }
+    void PressForward() { SendChatCommand("setControlState forward true"); }
+    void ReleaseForward() { SendChatCommand("setControlState forward false"); }
+    void PressBack() { SendChatCommand("setControlState back true"); }
+    void ReleaseBack() { SendChatCommand("setControlState back false"); }
+    void PressLeft() { SendChatCommand("setControlState left true"); }
+    void ReleaseLeft() { SendChatCommand("setControlState left false"); }
+    void PressRight() { SendChatCommand("setControlState right true"); }
+    void ReleaseRight() { SendChatCommand("setControlState right false"); }
+    void PressSprint() { SendChatCommand("setControlState sprint true"); }
+    void ReleaseSprint() { SendChatCommand("setControlState sprint false"); }
     void PressJump() { 
-        SetControlState("jump", true);
+        SendChatCommand("setControlState jump true");
         Sleep(50);
-        SetControlState("jump", false);
+        SendChatCommand("setControlState jump false");
     }
 
     void StopAll() {
@@ -404,7 +365,6 @@ public:
         ReleaseSprint();
     }
 
-    // ==================== ПОВОРОТ ====================
     void TurnToTarget(Vec3 target) {
         Vec3 pos = GetPos();
         float angle = atan2(target.y - pos.y, target.x - pos.x);
@@ -437,7 +397,6 @@ public:
         currentAngleDiff = diff;
     }
 
-    // ==================== СКАНИРОВАНИЕ МАРКЕРОВ ====================
     void ScanMarkers() {
         if (!proc || !baseAddr) return;
         auto now = chrono::high_resolution_clock::now();
@@ -519,7 +478,6 @@ public:
         }
     }
 
-    // ==================== ИЗБЕГАНИЕ ПРЕПЯТСТВИЙ ====================
     Vec3 AvoidObstacle(Vec3 target) {
         Vec3 pos = GetPos();
         Vec3 result = target;
@@ -575,7 +533,6 @@ public:
         return result;
     }
 
-    // ==================== ГЛАВНЫЙ ЦИКЛ ====================
     void BotLoop() {
         active = true;
         Print("[START] Bot started! Press F11 for emergency stop.", 10);
@@ -915,4 +872,23 @@ int main() {
 
     Bot bot;
     if (!bot.Ready()) {
-        Set
+        SetColor(12);
+        cout << "\n[ERROR] MTA Province not found!" << endl;
+        cout << "Make sure the game is running." << endl;
+        SetColor(15);
+        system("pause");
+        return 1;
+    }
+
+    SetColor(10);
+    cout << "[OK] BOT READY!" << endl;
+    SetColor(15);
+    cout << "[INFO] Press F1 to start" << endl;
+    cout << endl;
+
+    thread handler(&Bot::HotkeyHandler, &bot);
+    handler.detach();
+
+    while (true) Sleep(1000);
+    return 0;
+}
