@@ -1,4 +1,4 @@
-// main.cpp - MTA Bot with Job Detection
+// main.cpp - MTA Bot with Jump and Obstacle Avoidance
 #define _USE_MATH_DEFINES
 #include <windows.h>
 #include <tlhelp32.h>
@@ -10,8 +10,6 @@
 #include <string>
 #include <algorithm>
 #include <chrono>
-#include <map>
-#include <mutex>
 
 using namespace std;
 using namespace chrono;
@@ -19,8 +17,6 @@ using namespace chrono;
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-
-mutex memoryMutex;
 
 void SetColor(int color) {
     HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -30,13 +26,9 @@ void SetColor(int color) {
 struct Vec3 { float x, y, z; };
 struct Marker { 
     Vec3 pos; 
-    int type; 
-    bool active; 
     bool collected; 
     DWORD address; 
     time_t spawnTime;
-    int id;
-    bool isDeliveryPoint;
 };
 
 class Bot {
@@ -46,48 +38,47 @@ private:
     DWORD64 baseAddr;
     HWND gameWnd;
     
-    bool running, active, carrying, emergency;
-    float speed;
-    int collected, delivered;
+    bool running, active, emergency;
+    int collected;
     
     vector<Marker> markers;
-    vector<Marker> collectedMarkers;
     vector<Vec3> obstacles;
-    Vec3 deliveryPoint;
     
     chrono::high_resolution_clock::time_point lastScan;
     int stuckCount;
     Vec3 lastPos;
-    int jumpCounter;
+    int stepCounter;
     
     DWORD pedAddress;
     
     float currentAngleDiff;
-    Vec3 avoidancePoint;
-    bool avoiding;
-    int avoidanceCounter;
-    float lastDistanceToTarget;
     int sameDistanceCount;
+    float lastDistanceToTarget;
     
     bool wPressed, aPressed, sPressed, dPressed, shiftPressed;
+    chrono::high_resolution_clock::time_point lastJumpTime;
+    chrono::high_resolution_clock::time_point lastPrintTime;
+    chrono::high_resolution_clock::time_point lastObstacleCheck;
     
-    // Состояние работы
-    bool jobActive;
-    chrono::high_resolution_clock::time_point jobCheckTime;
-    int noMarkerCount;
+    // Для обхода препятствий
+    bool avoiding;
+    int avoidCounter;
+    Vec3 avoidPoint;
+    float avoidAngle;
 
 public:
     Bot() : proc(NULL), pid(0), playerAddr(0), baseAddr(0), running(false),
-            active(false), carrying(false), speed(0.25f), collected(0),
-            delivered(0), emergency(false), stuckCount(0),
-            jumpCounter(0), currentAngleDiff(0), avoiding(false), avoidanceCounter(0),
-            lastDistanceToTarget(0), sameDistanceCount(0), pedAddress(0),
-            wPressed(false), aPressed(false), sPressed(false), dPressed(false), 
-            shiftPressed(false), jobActive(false), noMarkerCount(0) {
-        deliveryPoint = {0,0,0};
+            active(false), emergency(false), collected(0), stuckCount(0),
+            stepCounter(0), currentAngleDiff(0), sameDistanceCount(0), 
+            lastDistanceToTarget(0), pedAddress(0), wPressed(false), aPressed(false), 
+            sPressed(false), dPressed(false), shiftPressed(false),
+            avoiding(false), avoidCounter(0), avoidAngle(0) {
         lastPos = {0,0,0};
-        avoidancePoint = {0,0,0};
+        avoidPoint = {0,0,0};
         gameWnd = NULL;
+        lastJumpTime = chrono::high_resolution_clock::now();
+        lastPrintTime = chrono::high_resolution_clock::now();
+        lastObstacleCheck = chrono::high_resolution_clock::now();
         FindProcess();
         if (proc) FindAddresses();
     }
@@ -119,6 +110,7 @@ public:
     void FindProcess() {
         gameWnd = FindWindowW(NULL, L"MTA: Province");
         if (!gameWnd) gameWnd = FindWindowW(NULL, L"MTA: San Andreas");
+        
         if (gameWnd) {
             GetWindowThreadProcessId(gameWnd, &pid);
             proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_OPERATION, FALSE, pid);
@@ -137,12 +129,11 @@ public:
                     transform(name.begin(), name.end(), name.begin(), ::towlower);
                     if (name.find(L"gta_sa") != wstring::npos || 
                         name.find(L"gta") != wstring::npos || 
-                        name.find(L"mta") != wstring::npos ||
-                        name.find(L"proxy") != wstring::npos) {
+                        name.find(L"mta") != wstring::npos) {
                         pid = pe.th32ProcessID;
                         proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_OPERATION, FALSE, pid);
                         if (proc) { 
-                            Print("[OK] Process found: " + string(name.begin(), name.end()), 10); 
+                            Print("[OK] Process found", 10);
                             break; 
                         }
                     }
@@ -150,12 +141,10 @@ public:
             }
             CloseHandle(snap);
         }
-        if (!proc) Print("[ERROR] MTA Province not found!", 12);
     }
 
     void FindAddresses() {
         if (!proc) return;
-        Print("[INFO] Searching addresses...", 11);
         
         HMODULE mods[1024]; DWORD needed;
         if (EnumProcessModules(proc, mods, sizeof(mods), &needed)) {
@@ -179,15 +168,13 @@ public:
                     z > -1000 && z < 10000) {
                     playerAddr = addr;
                     pedAddress = test;
-                    Print("[OK] Player found at 0x" + to_string(addr), 10);
-                    break;
+                    Print("[OK] Player found", 10);
+                    return;
                 }
             }
         }
         
-        if (!playerAddr) {
-            Print("[ERROR] Player not found!", 12);
-        }
+        Print("[ERROR] Player not found!", 12);
     }
 
     Vec3 GetPos() {
@@ -203,78 +190,86 @@ public:
         return pos;
     }
 
-    // ==================== ПОИСК МАРКЕРОВ ====================
+    float GetAngle() {
+        DWORD ped = GetPedAddress();
+        if (ped && ped > 0x10000 && ped < 0x7FFFFFFF) {
+            return Read<float>(ped + 0x20);
+        }
+        return 0;
+    }
+
+    // Проверка препятствий впереди
+    bool CheckObstacleAhead(float checkDist = 3.0f) {
+        Vec3 pos = GetPos();
+        float angle = GetAngle() * M_PI / 180.0f;
+        
+        // Точка впереди
+        float checkX = pos.x + cos(angle) * checkDist;
+        float checkY = pos.y + sin(angle) * checkDist;
+        
+        // Проверяем известные препятствия
+        for (auto& obs : obstacles) {
+            float d = sqrt(pow(obs.x - checkX, 2) + pow(obs.y - checkY, 2));
+            if (d < 2.0f) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
+    // Поиск маркеров
     void ScanMarkers() {
         if (!proc) return;
         
         Vec3 playerPos = GetPos();
         if (playerPos.x == 0 && playerPos.y == 0) return;
         
-        // Очищаем старые маркеры
         time_t currentTime = time(NULL);
         markers.erase(remove_if(markers.begin(), markers.end(),
             [currentTime](const Marker& m) { 
-                return (currentTime - m.spawnTime) > 60; // Удаляем маркеры старше 60 секунд
+                return (currentTime - m.spawnTime) > 30; 
             }), markers.end());
         
-        // Сканируем память в поисках новых маркеров
-        const DWORD64 scanRegions[][2] = {
-            {baseAddr, baseAddr + 0x1000000},
-            {0x10000000, 0x20000000},
-            {0x20000000, 0x30000000}
-        };
-        
-        for (int region = 0; region < 3; region++) {
-            DWORD64 start = scanRegions[region][0];
-            DWORD64 end = scanRegions[region][1];
+        // Сканируем память
+        for (DWORD64 addr = baseAddr; addr < baseAddr + 0x500000; addr += 4) {
+            float x = Read<float>((DWORD)addr);
+            float y = Read<float>((DWORD)(addr + 4));
+            float z = Read<float>((DWORD)(addr + 8));
             
-            for (DWORD64 addr = start; addr < end; addr += 4) {
-                float x = Read<float>((DWORD)addr);
-                float y = Read<float>((DWORD)(addr + 4));
-                float z = Read<float>((DWORD)(addr + 8));
-                
-                // Фильтры для координат
-                if (x < -3000 || x > 3000) continue;
-                if (y < -3000 || y > 3000) continue;
-                if (z < -100 || z > 1000) continue;
-                if (x == 0 && y == 0) continue;
-                
-                // Расстояние до игрока
-                float dist = sqrt(pow(x - playerPos.x, 2) + pow(y - playerPos.y, 2));
-                if (dist > 300) continue;
-                
-                // Не координаты игрока
-                if (abs(x - playerPos.x) < 1 && abs(y - playerPos.y) < 1) continue;
-                
-                // Проверка на дубликаты
-                bool exists = false;
-                for (auto& m : markers) {
-                    float d = sqrt(pow(m.pos.x - x, 2) + pow(m.pos.y - y, 2));
-                    if (d < 2.0f) { exists = true; break; }
-                }
-                if (exists) continue;
-                
-                // Создаем новый маркер
-                Marker m;
-                m.pos = {x, y, z};
-                m.type = 1;
-                m.active = true;
-                m.collected = false;
-                m.address = (DWORD)addr;
-                m.spawnTime = currentTime;
-                m.id = markers.size();
-                m.isDeliveryPoint = false;
-                
-                markers.push_back(m);
-                Print("[FOUND] Green marker at distance " + to_string((int)dist) + "m", 10);
-                
-                if (markers.size() > 20) break;
+            if (x < -3000 || x > 3000) continue;
+            if (y < -3000 || y > 3000) continue;
+            if (z < -100 || z > 1000) continue;
+            if (x == 0 && y == 0) continue;
+            
+            float dist = sqrt(pow(x - playerPos.x, 2) + pow(y - playerPos.y, 2));
+            if (dist > 200) continue;
+            
+            if (abs(x - playerPos.x) < 2 && abs(y - playerPos.y) < 2) continue;
+            
+            bool exists = false;
+            for (auto& m : markers) {
+                float d = sqrt(pow(m.pos.x - x, 2) + pow(m.pos.y - y, 2));
+                if (d < 2.0f) { exists = true; break; }
+            }
+            if (exists) continue;
+            
+            Marker m;
+            m.pos = {x, y, z};
+            m.collected = false;
+            m.address = (DWORD)addr;
+            m.spawnTime = currentTime;
+            markers.push_back(m);
+            
+            auto now = chrono::high_resolution_clock::now();
+            if (duration_cast<milliseconds>(now - lastPrintTime).count() > 2000) {
+                Print("[FOUND] Marker at " + to_string((int)dist) + "m", 10);
+                lastPrintTime = now;
             }
             
-            if (markers.size() > 10) break;
+            if (markers.size() > 20) break;
         }
         
-        // Сортируем по расстоянию
         sort(markers.begin(), markers.end(), [playerPos](const Marker& a, const Marker& b) {
             float da = sqrt(pow(a.pos.x - playerPos.x, 2) + pow(a.pos.y - playerPos.y, 2));
             float db = sqrt(pow(b.pos.x - playerPos.x, 2) + pow(b.pos.y - playerPos.y, 2));
@@ -282,10 +277,10 @@ public:
         });
     }
 
-    // ==================== КЛАВИШИ ====================
+    // Клавиши
     void SendKey(WORD key, bool press) {
         keybd_event((BYTE)key, 0, press ? 0 : KEYEVENTF_KEYUP, 0);
-        Sleep(10);
+        Sleep(5);
     }
 
     void PressW() { if (!wPressed) { SendKey('W', true); wPressed = true; } }
@@ -298,9 +293,10 @@ public:
     void ReleaseD() { if (dPressed) { SendKey('D', false); dPressed = false; } }
     void PressShift() { if (!shiftPressed) { SendKey(VK_SHIFT, true); shiftPressed = true; } }
     void ReleaseShift() { if (shiftPressed) { SendKey(VK_SHIFT, false); shiftPressed = false; } }
-    void PressSpace() { 
+    
+    void Jump() { 
         SendKey(VK_SPACE, true);
-        Sleep(50);
+        Sleep(30);
         SendKey(VK_SPACE, false);
     }
 
@@ -312,159 +308,214 @@ public:
         ReleaseShift();
     }
 
-    // ==================== ПОВОРОТ ====================
+    // Поворот к цели
     void TurnToTarget(Vec3 target) {
         Vec3 pos = GetPos();
-        float angle = atan2(target.y - pos.y, target.x - pos.x);
-        float currentAngle = 0;
+        float targetAngle = atan2(target.y - pos.y, target.x - pos.x) * 180.0f / M_PI - 90.0f;
+        float currentAngle = GetAngle();
         
-        DWORD ped = GetPedAddress();
-        if (ped && ped > 0x10000 && ped < 0x7FFFFFFF) {
-            currentAngle = Read<float>(ped + 0x20);
-        }
-        
-        float diff = angle * 180.0f / M_PI - 90.0f - currentAngle;
+        float diff = targetAngle - currentAngle;
         while (diff > 180) diff -= 360;
         while (diff < -180) diff += 360;
         
-        if (abs(diff) > 15) {
+        // Плавный поворот
+        if (abs(diff) > 30) {
+            // Большой угол - держим клавишу
             if (diff > 0) { PressD(); ReleaseA(); }
             else { PressA(); ReleaseD(); }
-        } else if (abs(diff) > 5) {
+        } else if (abs(diff) > 10) {
+            // Средний угол - короткие нажатия
             if (diff > 0) { 
-                PressD(); Sleep(20); ReleaseD();
+                PressD(); Sleep(25); ReleaseD();
                 ReleaseA();
             } else { 
-                PressA(); Sleep(20); ReleaseA();
+                PressA(); Sleep(25); ReleaseA();
+                ReleaseD();
+            }
+        } else if (abs(diff) > 3) {
+            // Маленький угол - очень короткие нажатия
+            if (diff > 0) { 
+                PressD(); Sleep(10); ReleaseD();
+                ReleaseA();
+            } else { 
+                PressA(); Sleep(10); ReleaseA();
                 ReleaseD();
             }
         } else {
+            // Почти точно - отпускаем
             ReleaseA(); ReleaseD();
         }
         
         currentAngleDiff = diff;
     }
 
-    // ==================== ГЛАВНЫЙ ЦИКЛ ====================
+    // Обход препятствия
+    Vec3 AvoidObstacle(Vec3 target) {
+        Vec3 pos = GetPos();
+        
+        if (avoiding && avoidCounter > 0) {
+            avoidCounter--;
+            return avoidPoint;
+        }
+        
+        // Проверяем препятствия впереди
+        if (CheckObstacleAhead(3.0f)) {
+            // Выбираем сторону обхода
+            float targetAngle = atan2(target.y - pos.y, target.x - pos.x);
+            
+            // Точка обхода слева
+            Vec3 leftPoint = {
+                pos.x + cos(targetAngle - M_PI/2) * 5.0f,
+                pos.y + sin(targetAngle - M_PI/2) * 5.0f,
+                pos.z
+            };
+            
+            // Точка обхода справа
+            Vec3 rightPoint = {
+                pos.x + cos(targetAngle + M_PI/2) * 5.0f,
+                pos.y + sin(targetAngle + M_PI/2) * 5.0f,
+                pos.z
+            };
+            
+            // Выбираем ближайшую к цели
+            float leftDist = sqrt(pow(leftPoint.x - target.x, 2) + pow(leftPoint.y - target.y, 2));
+            float rightDist = sqrt(pow(rightPoint.x - target.x, 2) + pow(rightPoint.y - target.y, 2));
+            
+            if (leftDist < rightDist) {
+                avoidPoint = leftPoint;
+            } else {
+                avoidPoint = rightPoint;
+            }
+            
+            avoiding = true;
+            avoidCounter = 20; // 1 секунда обхода
+            
+            // Добавляем текущую позицию как препятствие
+            obstacles.push_back(pos);
+            
+            return avoidPoint;
+        }
+        
+        avoiding = false;
+        return target;
+    }
+
+    // Главный цикл
     void BotLoop() {
         active = true;
-        Print("[START] Bot started! Waiting for job...", 10);
-        Print("[INFO] Take the job in game to start collecting", 11);
+        Print("[START] Bot started!", 10);
+        Print("[INFO] Take the job in game", 11);
         
         int scanCount = 0;
         lastPos = GetPos();
         stuckCount = 0;
-        jumpCounter = 0;
+        stepCounter = 0;
         Vec3 targetPos = {0,0,0};
         bool hasTarget = false;
 
         while (active) {
-            if (!running || emergency) { StopAll(); Sleep(100); continue; }
+            if (!running || emergency) { 
+                StopAll(); 
+                Sleep(100); 
+                continue; 
+            }
             
             scanCount++;
             Vec3 pos = GetPos();
             
-            // Сканируем маркеры каждые 2 секунды
-            if (scanCount % 40 == 0) {
+            // Сканируем каждые 3 секунды
+            if (scanCount % 60 == 0) {
                 ScanMarkers();
-                
-                // Проверяем, есть ли маркеры
-                if (markers.empty()) {
-                    noMarkerCount++;
-                    if (noMarkerCount == 1) {
-                        Print("[WAIT] No markers found. Take the job in game!", 14);
-                        Print("[WAIT] Bot will auto-detect markers when they appear", 14);
-                    }
-                } else {
-                    noMarkerCount = 0;
-                }
             }
             
             // Проверка застревания
-            float move = sqrt(pow(pos.x - lastPos.x, 2) + pow(pos.y - lastPos.y, 2));
-            if (move < 0.05f && hasTarget) {
-                stuckCount++;
-                if (stuckCount > 30) {
-                    Print("[WARN] Stuck! Jumping...", 14);
-                    PressSpace();
-                    Sleep(200);
-                    PressSpace();
+            if (hasTarget) {
+                float move = sqrt(pow(pos.x - lastPos.x, 2) + pow(pos.y - lastPos.y, 2));
+                if (move < 0.05f) {
+                    stuckCount++;
+                    if (stuckCount > 30) { // ~1.5 секунды
+                        Print("[JUMP] Stuck, jumping", 14);
+                        Jump();
+                        stuckCount = 0;
+                        
+                        // Добавляем препятствие
+                        obstacles.push_back(pos);
+                    }
+                } else {
                     stuckCount = 0;
+                    stepCounter++;
                 }
-            } else { 
-                stuckCount = 0; 
             }
             lastPos = pos;
-
+            
             // Выбираем ближайший маркер
-            if (!hasTarget && !markers.empty()) {
-                Marker* nearest = nullptr;
-                float nearDist = 999999.0f;
-                
+            if (!markers.empty()) {
                 for (auto& m : markers) {
-                    if (!m.collected && m.active) {
-                        float d = sqrt(pow(m.pos.x - pos.x, 2) + pow(m.pos.y - pos.y, 2));
-                        if (d < nearDist) {
-                            nearest = &m;
-                            nearDist = d;
-                        }
+                    if (!m.collected) {
+                        targetPos = m.pos;
+                        hasTarget = true;
+                        break;
                     }
-                }
-                
-                if (nearest) {
-                    targetPos = nearest->pos;
-                    hasTarget = true;
-                    Print("[TARGET] Moving to marker at " + to_string((int)nearDist) + "m", 11);
                 }
             }
             
-            // Движение к цели
+            // Движение
             if (hasTarget) {
                 float distToTarget = sqrt(pow(targetPos.x - pos.x, 2) + pow(targetPos.y - pos.y, 2));
                 
-                // Если достигли маркера
-                if (distToTarget < 3.0f) {
-                    Print("[REACHED] Marker reached!", 10);
-                    hasTarget = false;
-                    
-                    // Отмечаем маркер как собранный
+                // Достигли маркера
+                if (distToTarget < 2.5f) {
                     for (auto& m : markers) {
                         float d = sqrt(pow(m.pos.x - pos.x, 2) + pow(m.pos.y - pos.y, 2));
                         if (d < 5.0f && !m.collected) {
                             m.collected = true;
                             collected++;
-                            Print("[COLLECTED] Box collected! Total: " + to_string(collected), 10);
+                            Print("[COLLECT] Box collected! Total: " + to_string(collected), 10);
                             break;
                         }
                     }
                     
+                    hasTarget = false;
                     StopAll();
                     continue;
                 }
                 
-                // Поворачиваемся к цели
-                TurnToTarget(targetPos);
+                // Проверяем препятствия и обходим
+                Vec3 moveTarget = AvoidObstacle(targetPos);
                 
-                // Движемся вперед
-                if (abs(currentAngleDiff) < 30) {
+                // Поворачиваемся к цели
+                TurnToTarget(moveTarget);
+                
+                // Движемся вперед если смотрим правильно
+                if (abs(currentAngleDiff) < 20) {
                     PressW();
                     ReleaseS();
+                    
+                    // Бежим если далеко
+                    if (distToTarget > 10.0f) {
+                        PressShift();
+                    } else {
+                        ReleaseShift();
+                    }
+                    
+                    // Прыгаем каждые 3 шага
+                    if (stepCounter % 3 == 0 && distToTarget > 5.0f) {
+                        auto now = chrono::high_resolution_clock::now();
+                        if (duration_cast<milliseconds>(now - lastJumpTime).count() > 500) {
+                            Jump();
+                            lastJumpTime = now;
+                            stepCounter = 0;
+                        }
+                    }
                 } else {
                     ReleaseW();
-                    ReleaseS();
-                }
-                
-                // Бежим если далеко
-                if (distToTarget > 10.0f && abs(currentAngleDiff) < 15) {
-                    PressShift();
-                } else {
                     ReleaseShift();
                 }
             } else {
                 StopAll();
             }
             
-            Sleep(30);
+            Sleep(50);
         }
         
         StopAll();
@@ -477,28 +528,23 @@ public:
     }
 
     void Start() {
-        if (running) { Print("[WARN] Bot already running!", 14); return; }
-        if (!proc || !playerAddr) { Print("[ERROR] Bot not initialized!", 12); return; }
+        if (running) { Print("[WARN] Already running!", 14); return; }
+        if (!proc || !playerAddr) { Print("[ERROR] Not initialized!", 12); return; }
         
-        running = true; emergency = false; carrying = false;
+        running = true; 
+        emergency = false;
         markers.clear();
-        collectedMarkers.clear();
         obstacles.clear();
         lastScan = chrono::high_resolution_clock::now();
-        
-        avoiding = false;
-        avoidanceCounter = 0;
+        stuckCount = 0;
+        stepCounter = 0;
         sameDistanceCount = 0;
         lastDistanceToTarget = 0;
-        noMarkerCount = 0;
+        avoiding = false;
+        avoidCounter = 0;
         
-        if (gameWnd) { 
-            SetForegroundWindow(gameWnd);
-            Sleep(500);
-        }
-        
-        Print("[START] Bot started! Waiting for job...", 10);
-        Print("[INFO] Take the job in game to start collecting", 11);
+        Print("[START] Bot started!", 10);
+        Print("[INFO] Take the job in game now", 11);
         
         thread(&Bot::BotLoop, this).detach();
     }
@@ -506,7 +552,7 @@ public:
     void Stop() { 
         running = false; 
         StopAll(); 
-        Print("[STOP] Bot stopped. Collected: " + to_string(collected), 14); 
+        Print("[STOP] Stopped. Collected: " + to_string(collected), 14); 
     }
     
     void EmergencyStop() { 
@@ -514,30 +560,24 @@ public:
         running = false; 
         active = false; 
         StopAll(); 
-        Print("[EMERGENCY] EMERGENCY STOP! (F11)", 12); 
+        Print("[EMERGENCY] STOP!", 12); 
     }
 
     void ShowStatus() {
         Vec3 pos = GetPos();
         SetColor(11);
-        cout << "\n========================================" << endl;
-        cout << "           BOT STATUS" << endl;
-        cout << "========================================" << endl;
+        cout << "\n========== STATUS ==========" << endl;
         SetColor(15);
-        cout << "  Position:   X=" << (int)pos.x << " Y=" << (int)pos.y << " Z=" << (int)pos.z << endl;
-        cout << "  Status:     " << (running ? "[RUNNING]" : "[STOPPED]") << endl;
-        cout << "  Collected:  " << collected << endl;
-        cout << "  Markers:    " << markers.size() << endl;
-        if (markers.empty()) {
-            cout << "  Job:        [NO MARKERS - TAKE JOB]" << endl;
-        } else {
-            cout << "  Job:        [ACTIVE]" << endl;
-        }
+        cout << "  Position:  X=" << (int)pos.x << " Y=" << (int)pos.y << " Z=" << (int)pos.z << endl;
+        cout << "  Running:   " << (running ? "YES" : "NO") << endl;
+        cout << "  Collected: " << collected << endl;
+        cout << "  Markers:   " << markers.size() << endl;
+        cout << "  Obstacles: " << obstacles.size() << endl;
         SetColor(11);
-        cout << "========================================" << endl;
+        cout << "============================" << endl;
         cout << "  F1-Start  F2-Stop  F5-Status" << endl;
         cout << "  F11-Emergency  ESC-Exit" << endl;
-        cout << "========================================" << endl;
+        cout << "============================" << endl;
         SetColor(15);
     }
 
@@ -549,7 +589,6 @@ public:
             if (GetAsyncKeyState(VK_F11) & 1) EmergencyStop();
             if (GetAsyncKeyState(VK_ESCAPE) & 1) { 
                 EmergencyStop(); 
-                Print("[EXIT] Exiting...", 14); 
                 exit(0); 
             }
             Sleep(50);
@@ -570,42 +609,30 @@ int main() {
     system("cls");
 
     SetColor(10);
-    cout << "\n==================================================" << endl;
-    cout << "      MTA PROVINCE BOX COLLECTOR" << endl;
-    cout << "==================================================" << endl;
-    cout << "  [WAIT] Start bot BEFORE taking job" << endl;
-    cout << "  [FIND] Auto-detects green markers" << endl;
-    cout << "  [MOVE] Moves to nearest marker" << endl;
-    cout << "  [COLLECT] Collects boxes automatically" << endl;
-    cout << "==================================================" << endl;
-    SetColor(14);
-    cout << "\n  HOW TO USE:" << endl;
+    cout << "\n========================================" << endl;
+    cout << "    MTA PROVINCE BOX COLLECTOR" << endl;
+    cout << "========================================" << endl;
+    cout << "  HOW TO USE:" << endl;
     cout << "  1. Start bot (F1)" << endl;
-    cout << "  2. Take the job in game" << endl;
-    cout << "  3. Bot will auto-detect markers" << endl;
-    cout << "  4. Bot will collect boxes" << endl;
-    cout << endl;
-    cout << "  [WARN] Run as Administrator!" << endl;
-    cout << "  [WARN] Game window MUST be active!" << endl;
-    cout << endl;
+    cout << "  2. Take job in game" << endl;
+    cout << "  3. Bot runs and jumps to boxes" << endl;
+    cout << "========================================" << endl;
+    SetColor(14);
+    cout << "  F1-Start  F2-Stop  F5-Status" << endl;
+    cout << "  F11-Emergency  ESC-Exit" << endl;
+    cout << "========================================" << endl;
     SetColor(15);
 
     Bot bot;
     if (!bot.Ready()) {
         SetColor(12);
-        cout << "\n[ERROR] MTA Province not found!" << endl;
-        cout << "Make sure the game is running." << endl;
+        cout << "\n[ERROR] MTA not found!" << endl;
         SetColor(15);
         system("pause");
         return 1;
     }
 
-    SetColor(10);
-    cout << "[OK] BOT READY!" << endl;
-    SetColor(15);
-    cout << "[INFO] Press F1 to start" << endl;
-    cout << "[INFO] Then take the job in game" << endl;
-    cout << endl;
+    cout << "[OK] Ready! Press F1 to start" << endl;
 
     thread handler(&Bot::HotkeyHandler, &bot);
     handler.detach();
