@@ -1,4 +1,4 @@
-// main.cpp - MTA Bot (Console Control)
+// main.cpp - MTA Province Bot (Mouse Turn + Smooth Movement)
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
@@ -9,6 +9,7 @@
 #include <string>
 #include <algorithm>
 #include <chrono>
+#include <random>
 
 using namespace std;
 using namespace chrono;
@@ -41,15 +42,26 @@ private:
     Vec3 lastPos;
     bool shiftPressed;
     int jumpCounter;
-    bool wPressed, aPressed, sPressed, dPressed;
+    bool wPressed, sPressed;
+    
+    // Для плавного движения
+    float targetAngle;
+    float currentAngle;
+    int smoothCounter;
+    Vec3 lastTargetPos;
+    bool hasLastTarget;
+    POINT lastMousePos;
 
 public:
     Bot() : proc(NULL), pid(0), playerAddr(0), baseAddr(0), running(false),
             active(false), carrying(false), speed(0.25f), collected(0),
             delivered(0), emergency(false), stuckCount(0), shiftPressed(false),
-            jumpCounter(0), wPressed(false), aPressed(false), sPressed(false), dPressed(false) {
+            jumpCounter(0), wPressed(false), sPressed(false),
+            targetAngle(0), currentAngle(0), smoothCounter(0), hasLastTarget(false) {
         deliveryPoint = {0,0,0};
         lastPos = {0,0,0};
+        lastTargetPos = {0,0,0};
+        lastMousePos = {0,0};
         gameWnd = NULL;
         FindProcess();
         if (proc) FindAddresses();
@@ -140,38 +152,25 @@ public:
         return pos;
     }
 
-    // ==================== ВНУТРИИГРОВЫЕ КОМАНДЫ ====================
-    void SendCommand(string cmd) {
-        if (!gameWnd) return;
-        
-        // Открываем консоль MTA (обычно ~ или F8)
-        // Отправляем команду через нажатия клавиш
-        // В MTA есть /bind и /unbind
-        
-        // Альтернатива: используем SendMessage для отправки команды
-        COPYDATASTRUCT cds;
-        cds.dwData = 0;
-        cds.cbData = cmd.length() + 1;
-        cds.lpData = (void*)cmd.c_str();
-        
-        SendMessage(gameWnd, WM_COPYDATA, 0, (LPARAM)&cds);
+    float GetAngle() {
+        float angle = 0;
+        DWORD ped = Read<DWORD>(playerAddr);
+        if (ped && ped > 0x10000 && ped < 0x7FFFFFFF) {
+            angle = Read<float>(ped + 0x20);
+        }
+        return angle;
     }
 
-    // ==================== KEYS ====================
+    // ==================== КЛАВИШИ ====================
     void SendKey(WORD key, bool press) {
-        // Пытаемся отправить через keybd_event
         keybd_event((BYTE)key, 0, press ? 0 : KEYEVENTF_KEYUP, 0);
-        Sleep(10);
+        Sleep(5);
     }
 
     void PressW() { if (!wPressed) { SendKey('W', true); wPressed = true; } }
     void ReleaseW() { if (wPressed) { SendKey('W', false); wPressed = false; } }
     void PressS() { if (!sPressed) { SendKey('S', true); sPressed = true; } }
     void ReleaseS() { if (sPressed) { SendKey('S', false); sPressed = false; } }
-    void PressA() { if (!aPressed) { SendKey('A', true); aPressed = true; } }
-    void ReleaseA() { if (aPressed) { SendKey('A', false); aPressed = false; } }
-    void PressD() { if (!dPressed) { SendKey('D', true); dPressed = true; } }
-    void ReleaseD() { if (dPressed) { SendKey('D', false); dPressed = false; } }
     
     void PressShift() { if (!shiftPressed) { SendKey(VK_SHIFT, true); shiftPressed = true; } }
     void ReleaseShift() { if (shiftPressed) { SendKey(VK_SHIFT, false); shiftPressed = false; } }
@@ -185,26 +184,59 @@ public:
     void StopAll() {
         ReleaseW();
         ReleaseS();
-        ReleaseA();
-        ReleaseD();
         ReleaseShift();
     }
 
-    // ==================== TURN ====================
-    void TurnToTarget(Vec3 target) {
-        Vec3 pos = GetPos();
-        float angle = atan2(target.y - pos.y, target.x - pos.x);
-        float currentAngle = 0;
-        DWORD ped = Read<DWORD>(playerAddr);
-        if (ped && ped > 0x10000 && ped < 0x7FFFFFFF) {
-            currentAngle = Read<float>(ped + 0x20);
+    // ==================== ПОВОРОТ МЫШКОЙ ====================
+    void MoveMouse(int deltaX, int deltaY) {
+        // Получаем текущую позицию мыши
+        POINT currentPos;
+        GetCursorPos(&currentPos);
+        
+        // Если мышь не в игре - центрируем
+        RECT rect;
+        GetWindowRect(gameWnd, &rect);
+        int centerX = (rect.left + rect.right) / 2;
+        int centerY = (rect.top + rect.bottom) / 2;
+        
+        // Если мышь далеко от центра - перемещаем в центр
+        if (abs(currentPos.x - centerX) > 100 || abs(currentPos.y - centerY) > 100) {
+            SetCursorPos(centerX, centerY);
+            currentPos.x = centerX;
+            currentPos.y = centerY;
         }
-        float diff = angle * 180.0f / 3.14159f - 90.0f - currentAngle;
+        
+        // Двигаем мышь
+        SetCursorPos(currentPos.x + deltaX, currentPos.y + deltaY);
+        lastMousePos = {currentPos.x + deltaX, currentPos.y + deltaY};
+    }
+
+    void SmoothTurnToTarget(Vec3 target) {
+        Vec3 pos = GetPos();
+        float angle = atan2(target.y - pos.y, target.x - pos.x) * 180.0f / 3.14159f - 90.0f;
+        float currentAngle = GetAngle();
+        
+        float diff = angle - currentAngle;
         while (diff > 180) diff -= 360;
         while (diff < -180) diff += 360;
-        if (diff > 5) { PressD(); ReleaseA(); }
-        else if (diff < -5) { PressA(); ReleaseD(); }
-        else { ReleaseA(); ReleaseD(); }
+        
+        // Ограничиваем максимальный поворот за один шаг (плавность)
+        float maxTurn = 6.0f;
+        if (abs(diff) > maxTurn) {
+            diff = (diff > 0) ? maxTurn : -maxTurn;
+        }
+        
+        // Добавляем небольшое случайное отклонение (как у игрока)
+        float randomOffset = (rand() % 40 - 20) / 100.0f;
+        diff += randomOffset;
+        
+        // Конвертируем угол в пиксели мыши
+        // В MTA чувствительность мыши примерно 1 градус = 2-3 пикселя
+        int mouseMove = (int)(diff * 2.5f);
+        
+        if (abs(mouseMove) > 1) {
+            MoveMouse(mouseMove, 0);
+        }
     }
 
     // ==================== SCAN MARKERS ====================
@@ -224,7 +256,6 @@ public:
             int type = Read<int>(addr + 0xC);
             bool active = Read<bool>(addr + 0x10);
             
-            // Фильтр
             if (!active) continue;
             if (x < -5000 || x > 5000) continue;
             if (y < -5000 || y > 5000) continue;
@@ -278,25 +309,140 @@ public:
         }
     }
 
-    // ==================== AVOID OBSTACLES ====================
-    Vec3 AvoidObstacle(Vec3 target) {
+    // ==================== ОБХОД ПРЕПЯТСТВИЙ ====================
+    Vec3 ScanObstacles(Vec3 target) {
         Vec3 pos = GetPos();
-        for (auto& o : obstacles) {
-            float d = sqrt(pow(o.x - pos.x, 2) + pow(o.y - pos.y, 2));
-            if (d < 4.0f) {
-                float angle = atan2(pos.y - o.y, pos.x - o.x);
-                Vec3 right = { o.x + cos(angle + 1.57f) * 5.0f, o.y + sin(angle + 1.57f) * 5.0f, pos.z };
-                return right;
+        Vec3 result = target;
+        
+        float angle = atan2(target.y - pos.y, target.x - pos.x);
+        float checkDistance = 8.0f;
+        
+        for (float d = 2.0f; d <= checkDistance; d += 1.0f) {
+            float checkX = pos.x + cos(angle) * d;
+            float checkY = pos.y + sin(angle) * d;
+            
+            for (auto& obs : obstacles) {
+                float dist = sqrt(pow(obs.x - checkX, 2) + pow(obs.y - checkY, 2));
+                if (dist < 3.0f) {
+                    float avoidAngle = atan2(pos.y - obs.y, pos.x - obs.x);
+                    
+                    Vec3 right = {
+                        obs.x + cos(avoidAngle + 1.2f) * 4.0f,
+                        obs.y + sin(avoidAngle + 1.2f) * 4.0f,
+                        pos.z
+                    };
+                    
+                    bool rightFree = true;
+                    for (auto& obs2 : obstacles) {
+                        float d2 = sqrt(pow(right.x - obs2.x, 2) + pow(right.y - obs2.y, 2));
+                        if (d2 < 3.0f) { rightFree = false; break; }
+                    }
+                    
+                    if (rightFree) {
+                        result = right;
+                        return result;
+                    } else {
+                        Vec3 left = {
+                            obs.x + cos(avoidAngle - 1.2f) * 4.0f,
+                            obs.y + sin(avoidAngle - 1.2f) * 4.0f,
+                            pos.z
+                        };
+                        result = left;
+                        return result;
+                    }
+                }
             }
         }
-        return target;
+        
+        return result;
+    }
+
+    // ==================== ПОИСК ПРЕПЯТСТВИЙ ====================
+    void DetectObstacles() {
+        Vec3 pos = GetPos();
+        if (pos.x == 0 && pos.y == 0) return;
+        
+        for (float x = pos.x - 15; x <= pos.x + 15; x += 1.5f) {
+            for (float y = pos.y - 15; y <= pos.y + 15; y += 1.5f) {
+                for (DWORD addr = baseAddr; addr < baseAddr + 0x100000; addr += 4) {
+                    float memX = Read<float>(addr);
+                    float memY = Read<float>(addr + 4);
+                    float memZ = Read<float>(addr + 8);
+                    
+                    if (memX < -5000 || memX > 5000) continue;
+                    if (memY < -5000 || memY > 5000) continue;
+                    
+                    if (abs(memX - x) < 0.5f && abs(memY - y) < 0.5f) {
+                        bool exists = false;
+                        for (auto& o : obstacles) { 
+                            float d = sqrt(pow(o.x - x, 2) + pow(o.y - y, 2)); 
+                            if (d < 2.0f) { exists = true; break; } 
+                        }
+                        if (!exists) { 
+                            Vec3 obs = {x, y, memZ}; 
+                            obstacles.push_back(obs); 
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        
+        vector<Vec3> newObstacles;
+        for (auto& o : obstacles) { 
+            float d = sqrt(pow(o.x - pos.x, 2) + pow(o.y - pos.y, 2)); 
+            if (d < 30.0f) newObstacles.push_back(o); 
+        }
+        obstacles = newObstacles;
+    }
+
+    // ==================== ДВИЖЕНИЕ ====================
+    void MoveToTarget(Vec3 target) {
+        Vec3 pos = GetPos();
+        float dist = sqrt(pow(target.x - pos.x, 2) + pow(target.y - pos.y, 2));
+        
+        if (dist < 0.5f) {
+            StopAll();
+            return;
+        }
+        
+        // Проверяем препятствия
+        Vec3 adjustedTarget = ScanObstacles(target);
+        if (adjustedTarget.x != target.x || adjustedTarget.y != target.y) {
+            float d = sqrt(pow(adjustedTarget.x - pos.x, 2) + pow(adjustedTarget.y - pos.y, 2));
+            if (d > 2.0f && d < 20.0f) {
+                target = adjustedTarget;
+            }
+        }
+        
+        // Плавный поворот мышкой
+        SmoothTurnToTarget(target);
+        
+        // Движение вперёд
+        PressW();
+        ReleaseS();
+        
+        // Shift (бег) только если нет ящика
+        if (!carrying) {
+            PressShift();
+            jumpCounter++;
+            if (jumpCounter % 4 == 0 && dist > 5.0f && rand() % 3 == 0) {
+                PressSpace();
+            }
+            if (jumpCounter > 20) jumpCounter = 0;
+        } else {
+            ReleaseShift();
+            if (jumpCounter % 8 == 0 && dist > 3.0f && rand() % 5 == 0) {
+                PressSpace();
+            }
+        }
     }
 
     // ==================== MAIN LOOP ====================
     void BotLoop() {
         active = true;
-        Print("[START] Bot started! Press F11 for emergency stop.", 10);
-        Print("[RUN] Use WASD + Shift + Space", 11);
+        Print("[START] Bot started! Mouse turn enabled.", 10);
+        Print("[RUN] Smooth movement + Obstacle avoidance", 11);
         
         int scanCount = 0;
         lastPos = GetPos();
@@ -304,6 +450,8 @@ public:
         jumpCounter = 0;
         Vec3 targetPos = {0,0,0};
         bool hasTarget = false;
+        int moveCounter = 0;
+        int randomDirection = 0;
 
         while (active) {
             if (!running || emergency) { StopAll(); Sleep(100); continue; }
@@ -313,25 +461,29 @@ public:
             
             // Проверка застревания
             float move = sqrt(pow(pos.x - lastPos.x, 2) + pow(pos.y - lastPos.y, 2));
-            if (move < 0.05f) {
+            if (move < 0.03f) {
                 stuckCount++;
-                if (stuckCount > 50) {
-                    Print("[WARN] Stuck! Jumping...", 14);
-                    PressSpace(); Sleep(200); PressSpace();
-                    PressA(); Sleep(500); ReleaseA();
+                if (stuckCount > 80) {
+                    Print("[WARN] Stuck! Jump and turn...", 14);
+                    PressSpace(); Sleep(150); PressSpace();
+                    MoveMouse(-200, 0);
+                    PressSpace();
                     stuckCount = 0;
                 }
-            } else { stuckCount = 0; }
+            } else {
+                stuckCount = max(0, stuckCount - 2);
+            }
             lastPos = pos;
 
             // Сканирование
             if (scanCount % 3 == 0) {
                 ScanMarkers();
+                DetectObstacles();
             }
 
-            // Логика
+            // ===== ЛОГИКА =====
             if (carrying) {
-                if (deliveryPoint.x != 0) {
+                if (deliveryPoint.x != 0 && deliveryPoint.x > -5000 && deliveryPoint.x < 5000) {
                     float dist = sqrt(pow(deliveryPoint.x - pos.x, 2) + pow(deliveryPoint.y - pos.y, 2));
                     if (dist < 2.0f) {
                         carrying = false; delivered++; ReleaseShift(); StopAll();
@@ -343,7 +495,15 @@ public:
                         targetPos = deliveryPoint; hasTarget = true;
                     }
                 } else {
-                    hasTarget = false; continue;
+                    hasTarget = false; 
+                    for (auto& m : markers) {
+                        if (m.type == 2) {
+                            deliveryPoint = m.pos;
+                            Print("[DROP] Found drop point!", 11);
+                            break;
+                        }
+                    }
+                    continue;
                 }
             } else {
                 Marker* nearest = nullptr; 
@@ -377,12 +537,27 @@ public:
                     }
                 } else {
                     hasTarget = false;
+                    moveCounter++;
+                    if (moveCounter % 30 == 0) {
+                        randomDirection = rand() % 4;
+                    }
+                    if (moveCounter % 5 == 0) {
+                        switch(randomDirection) {
+                            case 0: PressW(); ReleaseS(); break;
+                            case 1: PressS(); ReleaseW(); break;
+                            case 2: MoveMouse(-20, 0); break;
+                            case 3: MoveMouse(20, 0); break;
+                        }
+                    }
+                    if (moveCounter % 60 == 0) {
+                        StopAll();
+                    }
                     continue;
                 }
             }
 
             // ===== ДВИЖЕНИЕ =====
-            if (hasTarget) {
+            if (hasTarget && targetPos.x > -5000 && targetPos.x < 5000) {
                 Vec3 posNow = GetPos();
                 float distToTarget = sqrt(pow(targetPos.x - posNow.x, 2) + pow(targetPos.y - posNow.y, 2));
                 
@@ -392,31 +567,17 @@ public:
                     continue; 
                 }
 
-                // Обход препятствий
-                Vec3 obstacle = AvoidObstacle(targetPos);
-                float obsDist = sqrt(pow(obstacle.x - posNow.x, 2) + pow(obstacle.y - posNow.y, 2));
-                if (obsDist > 2.0f && obsDist < 20.0f) {
-                    targetPos = obstacle;
+                if (distToTarget > 500) {
+                    hasTarget = false;
+                    continue;
                 }
 
-                TurnToTarget(targetPos);
-                PressW(); 
-                ReleaseS();
-                
-                if (!carrying) {
-                    PressShift();
-                    jumpCounter++;
-                    if (jumpCounter % 3 == 0 && distToTarget > 3.0f) { 
-                        PressSpace(); 
-                    }
-                } else {
-                    ReleaseShift();
-                }
+                MoveToTarget(targetPos);
             } else {
                 StopAll();
             }
             
-            Sleep(50);
+            Sleep(30);
         }
     }
 
@@ -437,11 +598,14 @@ public:
         if (gameWnd) { 
             SetForegroundWindow(gameWnd);
             Sleep(500);
+            // Центрируем мышь в окне игры
+            RECT rect;
+            GetWindowRect(gameWnd, &rect);
+            SetCursorPos((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
         }
         
-        Print("[START] Bot started! Press F11 for emergency stop.", 10);
-        Print("[INFO] Make sure the game window is ACTIVE!", 11);
-        Print("[INFO] Do NOT minimize the game!", 11);
+        Print("[START] Bot started! Mouse turn enabled.", 10);
+        Print("[INFO] Press F11 for emergency stop.", 14);
         
         thread(&Bot::BotLoop, this).detach();
     }
@@ -466,6 +630,7 @@ public:
         cout << "  Delivered:  " << delivered << endl;
         cout << "  Found:      " << markers.size() << " boxes" << endl;
         cout << "  Obstacles:  " << obstacles.size() << endl;
+        cout << "  Control:    MOUSE TURN (smooth)" << endl;
         if (deliveryPoint.x != 0 && deliveryPoint.x > -5000 && deliveryPoint.x < 5000) {
             cout << "  Drop:       X=" << (int)deliveryPoint.x << " Y=" << (int)deliveryPoint.y << endl;
         }
@@ -491,17 +656,18 @@ public:
         cout << "  F11 - EMERGENCY STOP" << endl;
         cout << "  ESC - Exit" << endl;
         cout << endl;
-        cout << "  BOT CONTROLS (auto):" << endl;
+        cout << "  MOVEMENT:" << endl;
         cout << "  W - Forward" << endl;
-        cout << "  A - Left" << endl;
         cout << "  S - Back" << endl;
-        cout << "  D - Right" << endl;
+        cout << "  MOUSE - Turning (smooth)" << endl;
         cout << "  Shift - Sprint (no box)" << endl;
-        cout << "  Space - Jump (to box)" << endl;
+        cout << "  Space - Jump" << endl;
+        cout << endl;
+        cout << "  FEATURES:" << endl;
+        cout << "  Mouse turn (faster, realistic)" << endl;
+        cout << "  Smooth movement" << endl;
+        cout << "  Obstacle avoidance" << endl;
         SetColor(14);
-        cout << "========================================" << endl;
-        cout << "  IMPORTANT: Game window MUST be active!" << endl;
-        cout << "  DO NOT minimize the game!" << endl;
         cout << "========================================" << endl;
         SetColor(15);
     }
@@ -538,14 +704,13 @@ int main() {
     cout << "==================================================" << endl;
     cout << "  [BOX] Collects boxes" << endl;
     cout << "  [DROP] Delivers to drop point" << endl;
-    cout << "  [AVOID] Scans and avoids obstacles" << endl;
-    cout << "  [KEYS] W=Forward A=Left S=Back D=Right" << endl;
+    cout << "  [AVOID] Smart obstacle avoidance" << endl;
+    cout << "  [MOUSE] Mouse turn (faster, realistic)" << endl;
+    cout << "  [REAL] Looks like a real player" << endl;
     cout << "==================================================" << endl;
     SetColor(14);
     cout << "\n  [WARN] Run as Administrator!" << endl;
     cout << "  [WARN] MTA Province must be running!" << endl;
-    cout << "  [WARN] GAME WINDOW MUST BE ACTIVE!" << endl;
-    cout << "  [WARN] DO NOT MINIMIZE THE GAME!" << endl;
     cout << "  [WARN] Press F5 for controls" << endl;
     cout << endl;
     SetColor(15);
