@@ -1,4 +1,5 @@
-// main.cpp - MTA Bot with Bind System (Complete)
+// main.cpp - MTA Bot with Bind System (Complete Fixed)
+#define _USE_MATH_DEFINES
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
@@ -14,6 +15,10 @@
 
 using namespace std;
 using namespace chrono;
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 mutex memoryMutex;
 
@@ -75,7 +80,8 @@ public:
 class Bot {
 private:
     HANDLE proc;
-    DWORD pid, playerAddr, baseAddr;
+    DWORD pid, playerAddr;
+    DWORD64 baseAddr;
     HWND gameWnd;
     
     bool running, active, carrying, emergency;
@@ -138,7 +144,7 @@ public:
         }
         
         SIZE_T bytesRead;
-        if (ReadProcessMemory(proc, (LPCVOID)addr, &val, sizeof(T), &bytesRead)) {
+        if (ReadProcessMemory(proc, (LPCVOID)(DWORD64)addr, &val, sizeof(T), &bytesRead)) {
             if (bytesRead == sizeof(T)) {
                 return val;
             }
@@ -152,7 +158,7 @@ public:
         }
         if (NtReadMem) { 
             SIZE_T read; 
-            NtReadMem(proc, (PVOID)addr, &val, sizeof(T), &read); 
+            NtReadMem(proc, (PVOID)(DWORD64)addr, &val, sizeof(T), &read); 
         }
         return val;
     }
@@ -207,7 +213,7 @@ public:
         
         HMODULE mods[1024]; DWORD needed;
         if (EnumProcessModules(proc, mods, sizeof(mods), &needed)) {
-            baseAddr = (DWORD)mods[0];
+            baseAddr = (DWORD64)mods[0];
         }
         
         vector<DWORD> knownAddresses = {
@@ -234,8 +240,8 @@ public:
         }
         
         Print("[INFO] Scanning memory for player...", 11);
-        for (DWORD addr = baseAddr; addr < baseAddr + 0x500000; addr += 4) {
-            DWORD ped = Read<DWORD>(addr, false);
+        for (DWORD64 addr = baseAddr; addr < baseAddr + 0x500000; addr += 4) {
+            DWORD ped = Read<DWORD>((DWORD)addr, false);
             if (ped > 0x10000 && ped < 0x7FFFFFFF) {
                 float x = Read<float>(ped + 0x14, false);
                 float y = Read<float>(ped + 0x18, false);
@@ -245,9 +251,9 @@ public:
                     y > -10000 && y < 10000 && 
                     z > -1000 && z < 10000 &&
                     x != 0 && y != 0) {
-                    playerAddr = addr;
+                    playerAddr = (DWORD)addr;
                     pedAddress = ped;
-                    Print("[OK] Player address found at 0x" + to_string(addr), 10);
+                    Print("[OK] Player address found at 0x" + to_string((DWORD)addr), 10);
                     return;
                 }
             }
@@ -273,13 +279,11 @@ public:
     void SendChatCommand(string cmd) {
         if (!gameWnd) return;
         
-        // Открываем консоль
         PostMessage(gameWnd, WM_KEYDOWN, 'T', 0);
         Sleep(50);
         PostMessage(gameWnd, WM_KEYUP, 'T', 0);
         Sleep(100);
         
-        // Отправляем команду через буфер обмена
         if (OpenClipboard(NULL)) {
             EmptyClipboard();
             HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, cmd.length() + 1);
@@ -292,14 +296,12 @@ public:
             CloseClipboard();
         }
         
-        // Вставляем команду
         keybd_event(VK_CONTROL, 0, 0, 0);
         keybd_event('V', 0, 0, 0);
         keybd_event('V', 0, KEYEVENTF_KEYUP, 0);
         keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
         Sleep(100);
         
-        // Отправляем Enter
         keybd_event(VK_RETURN, 0, 0, 0);
         keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
         Sleep(100);
@@ -413,7 +415,7 @@ public:
             currentAngle = Read<float>(ped + 0x20);
         }
         
-        float diff = angle * 180.0f / 3.14159f - 90.0f - currentAngle;
+        float diff = angle * 180.0f / M_PI - 90.0f - currentAngle;
         while (diff > 180) diff -= 360;
         while (diff < -180) diff += 360;
         
@@ -445,10 +447,10 @@ public:
         Vec3 playerPos = GetPos();
         if (playerPos.x == 0 && playerPos.y == 0) return;
         
-        const DWORD scanSize = 0x800000;
+        const DWORD64 scanSize = 0x800000;
         const DWORD blockSize = 0x10000;
         
-        for (DWORD blockStart = baseAddr; blockStart < baseAddr + scanSize; blockStart += blockSize) {
+        for (DWORD64 blockStart = baseAddr; blockStart < baseAddr + scanSize; blockStart += blockSize) {
             vector<byte> buffer(blockSize);
             SIZE_T bytesRead;
             
@@ -469,7 +471,7 @@ public:
                     float dist = sqrt(pow(*x - playerPos.x, 2) + pow(*y - playerPos.y, 2));
                     if (dist > 500) continue;
                     
-                    DWORD addr = blockStart + offset;
+                    DWORD addr = (DWORD)(blockStart + offset);
                     
                     bool exists = false;
                     for (auto& m : markers) {
@@ -913,5 +915,4 @@ int main() {
 
     Bot bot;
     if (!bot.Ready()) {
-        SetColor(12);
-        cout << "\n[ERROR] MTA Province
+        Set
