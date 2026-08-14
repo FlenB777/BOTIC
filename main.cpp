@@ -1,4 +1,4 @@
-// main.cpp - MTA Bot (Working + Obstacle Avoidance)
+// main.cpp - MTA Bot (Bind System)
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
@@ -39,15 +39,16 @@ private:
     chrono::high_resolution_clock::time_point lastScan;
     int stuckCount;
     Vec3 lastPos;
-    bool shiftPressed;
     int jumpCounter;
-    bool wPressed, aPressed, sPressed, dPressed;
+    
+    // Состояние биндов
+    bool bindsActive;
 
 public:
     Bot() : proc(NULL), pid(0), playerAddr(0), baseAddr(0), running(false),
             active(false), carrying(false), speed(0.25f), collected(0),
-            delivered(0), emergency(false), stuckCount(0), shiftPressed(false),
-            jumpCounter(0), wPressed(false), aPressed(false), sPressed(false), dPressed(false) {
+            delivered(0), emergency(false), stuckCount(0),
+            jumpCounter(0), bindsActive(false) {
         deliveryPoint = {0,0,0};
         lastPos = {0,0,0};
         gameWnd = NULL;
@@ -55,7 +56,7 @@ public:
         if (proc) FindAddresses();
     }
 
-    ~Bot() { if (proc) CloseHandle(proc); StopAll(); }
+    ~Bot() { if (proc) CloseHandle(proc); UnbindAll(); }
 
     template<typename T>
     T Read(DWORD addr) {
@@ -149,62 +150,98 @@ public:
         return angle;
     }
 
-    // ==================== КЛАВИШИ ====================
-    void SendKey(WORD key, bool press) {
-        keybd_event((BYTE)key, 0, press ? 0 : KEYEVENTF_KEYUP, 0);
-        Sleep(5);
-    }
-
-    void PressW() { if (!wPressed) { SendKey('W', true); wPressed = true; } }
-    void ReleaseW() { if (wPressed) { SendKey('W', false); wPressed = false; } }
-    void PressS() { if (!sPressed) { SendKey('S', true); sPressed = true; } }
-    void ReleaseS() { if (sPressed) { SendKey('S', false); sPressed = false; } }
-    void PressA() { if (!aPressed) { SendKey('A', true); aPressed = true; } }
-    void ReleaseA() { if (aPressed) { SendKey('A', false); aPressed = false; } }
-    void PressD() { if (!dPressed) { SendKey('D', true); dPressed = true; } }
-    void ReleaseD() { if (dPressed) { SendKey('D', false); dPressed = false; } }
-    
-    void PressShift() { if (!shiftPressed) { SendKey(VK_SHIFT, true); shiftPressed = true; } }
-    void ReleaseShift() { if (shiftPressed) { SendKey(VK_SHIFT, false); shiftPressed = false; } }
-    
-    void PressSpace() { 
-        SendKey(VK_SPACE, true);
+    // ==================== ОТПРАВКА КОМАНД В КОНСОЛЬ MTA ====================
+    void SendConsoleCommand(string cmd) {
+        if (!gameWnd) return;
+        
+        // Открываем консоль (~ или F8)
+        // Отправляем команду через нажатия клавиш
+        // Альтернатива: используем WM_COPYDATA
+        COPYDATASTRUCT cds;
+        cds.dwData = 0;
+        cds.cbData = cmd.length() + 1;
+        cds.lpData = (void*)cmd.c_str();
+        
+        SendMessage(gameWnd, WM_COPYDATA, 0, (LPARAM)&cds);
         Sleep(50);
-        SendKey(VK_SPACE, false);
     }
 
-    void StopAll() {
-        ReleaseW();
-        ReleaseS();
-        ReleaseA();
-        ReleaseD();
-        ReleaseShift();
+    // ==================== БИНДЫ ====================
+    void ApplyBinds() {
+        if (bindsActive) return;
+        
+        Print("[BINDS] Applying binds...", 11);
+        
+        // Сначала сбрасываем старые
+        UnbindAll();
+        
+        // Устанавливаем новые бинды
+        SendConsoleCommand("bind w +forward");
+        SendConsoleCommand("bind s +backward");
+        SendConsoleCommand("bind a +left");
+        SendConsoleCommand("bind d +right");
+        SendConsoleCommand("bind shift +sprint");
+        SendConsoleCommand("bind space +jump");
+        
+        bindsActive = true;
+        Print("[BINDS] Binds applied!", 10);
     }
 
-    // ==================== ПЛАВНЫЙ ПОВОРОТ ====================
+    void UnbindAll() {
+        if (!bindsActive) return;
+        
+        Print("[BINDS] Removing binds...", 14);
+        
+        SendConsoleCommand("unbind w");
+        SendConsoleCommand("unbind s");
+        SendConsoleCommand("unbind a");
+        SendConsoleCommand("unbind d");
+        SendConsoleCommand("unbind shift");
+        SendConsoleCommand("unbind space");
+        
+        bindsActive = false;
+        Print("[BINDS] Binds removed.", 14);
+    }
+
+    // ==================== УПРАВЛЕНИЕ ЧЕРЕЗ БИНДЫ ====================
+    // Вместо симуляции нажатий, бот управляет через изменение угла
+    // Движение вперёд/назад включается через флаги
+
+    void MoveForward() { /* Бинд w уже активен, нужно только удерживать направление */ }
+    void MoveBack() { /* Бинд s уже активен */ }
+    void StopMove() { /* Отпускаем W и S через бинды не нужно, бинды сами работают */ }
+
+    // ==================== ПОВОРОТ (ПЛАВНЫЙ) ====================
     void TurnToTarget(Vec3 target) {
         Vec3 pos = GetPos();
-        float angle = atan2(target.y - pos.y, target.x - pos.x) * 180.0f / 3.14159f - 90.0f;
+        float targetAngle = atan2(target.y - pos.y, target.x - pos.x) * 180.0f / 3.14159f - 90.0f;
         float currentAngle = GetAngle();
         
-        float diff = angle - currentAngle;
+        float diff = targetAngle - currentAngle;
         while (diff > 180) diff -= 360;
         while (diff < -180) diff += 360;
         
-        // Плавный поворот (ограничение скорости)
+        // Плавный поворот через бинды A/D
         float maxTurn = 6.0f;
         if (abs(diff) > maxTurn) {
             diff = (diff > 0) ? maxTurn : -maxTurn;
         }
         
-        // Добавляем случайное отклонение для реалистичности
-        if (rand() % 8 == 0) {
-            diff += (rand() % 20 - 10) / 10.0f;
+        // A и D уже забинжены, они работают автоматически
+        // Но нам нужно их нажимать/отпускать
+        if (diff > 2.0f) {
+            // Нажимаем D (поворот направо)
+            keybd_event('D', 0, 0, 0);
+            Sleep(10);
+        } else if (diff < -2.0f) {
+            // Нажимаем A (поворот налево)
+            keybd_event('A', 0, 0, 0);
+            Sleep(10);
+        } else {
+            // Отпускаем A и D
+            keybd_event('D', 0, KEYEVENTF_KEYUP, 0);
+            keybd_event('A', 0, KEYEVENTF_KEYUP, 0);
         }
-        
-        if (diff > 2.0f) { PressD(); ReleaseA(); }
-        else if (diff < -2.0f) { PressA(); ReleaseD(); }
-        else { ReleaseA(); ReleaseD(); }
     }
 
     // ==================== ОБХОД ПРЕПЯТСТВИЙ ====================
@@ -212,7 +249,6 @@ public:
         Vec3 pos = GetPos();
         if (pos.x == 0 && pos.y == 0) return;
         
-        // Сканируем область вокруг игрока
         for (float x = pos.x - 15; x <= pos.x + 15; x += 1.5f) {
             for (float y = pos.y - 15; y <= pos.y + 15; y += 1.5f) {
                 for (DWORD addr = baseAddr; addr < baseAddr + 0x100000; addr += 4) {
@@ -238,7 +274,6 @@ public:
             }
         }
         
-        // Удаляем старые препятствия (дальше 30 метров)
         vector<Vec3> newObstacles;
         for (auto& o : obstacles) {
             if (sqrt(pow(o.x - pos.x, 2) + pow(o.y - pos.y, 2)) < 30.0f) {
@@ -252,7 +287,6 @@ public:
         Vec3 pos = GetPos();
         float angle = atan2(target.y - pos.y, target.x - pos.x);
         
-        // Проверяем путь вперёд на наличие препятствий
         for (float d = 2.0f; d <= 8.0f; d += 1.0f) {
             float checkX = pos.x + cos(angle) * d;
             float checkY = pos.y + sin(angle) * d;
@@ -260,17 +294,14 @@ public:
             for (auto& o : obstacles) {
                 float dist = sqrt(pow(o.x - checkX, 2) + pow(o.y - checkY, 2));
                 if (dist < 2.5f) {
-                    // Нашли препятствие!
                     float avoidAngle = atan2(pos.y - o.y, pos.x - o.x);
                     
-                    // Пробуем обойти справа
                     Vec3 right = {
                         o.x + cos(avoidAngle + 1.2f) * 4.0f,
                         o.y + sin(avoidAngle + 1.2f) * 4.0f,
                         pos.z
                     };
                     
-                    // Проверяем, свободно ли справа
                     bool rightFree = true;
                     for (auto& o2 : obstacles) {
                         if (sqrt(pow(right.x - o2.x, 2) + pow(right.y - o2.y, 2)) < 2.5f) {
@@ -280,26 +311,24 @@ public:
                     }
                     
                     if (rightFree) {
-                        Print("[AVOID] Obstacle! Going right...", 11);
+                        Print("[AVOID] Right!", 11);
                         return right;
                     }
                     
-                    // Обходим слева
                     Vec3 left = {
                         o.x + cos(avoidAngle - 1.2f) * 4.0f,
                         o.y + sin(avoidAngle - 1.2f) * 4.0f,
                         pos.z
                     };
-                    Print("[AVOID] Obstacle! Going left...", 11);
+                    Print("[AVOID] Left!", 11);
                     return left;
                 }
             }
         }
-        
         return target;
     }
 
-    // ==================== SCAN MARKERS ====================
+    // ==================== ПОИСК МАРКЕРОВ ====================
     void ScanMarkers() {
         if (!proc || !baseAddr) return;
         auto now = chrono::high_resolution_clock::now();
@@ -316,10 +345,8 @@ public:
             int type = Read<int>(addr + 0xC);
             bool active = Read<bool>(addr + 0x10);
             
-            // Фильтр
             if (!active) continue;
-            if (x < -5000 || x > 5000) continue;
-            if (y < -5000 || y > 5000) continue;
+            if (x < -5000 || x > 5000 || y < -5000 || y > 5000) continue;
             if (x == 0 && y == 0) continue;
             if (x == -2147483648 || y == -2147483648) continue;
             
@@ -370,11 +397,14 @@ public:
         }
     }
 
-    // ==================== MAIN LOOP ====================
+    // ==================== ГЛАВНЫЙ ЦИКЛ ====================
     void BotLoop() {
         active = true;
-        Print("[START] Bot started! Collecting boxes...", 10);
-        Print("[RUN] Smooth movement + Obstacle avoidance", 11);
+        Print("[START] Bot started! Using binds.", 10);
+        Print("[RUN] W=forward S=back A/D=turn Shift=sprint Space=jump", 11);
+        
+        // Применяем бинды при старте
+        ApplyBinds();
         
         int scanCount = 0;
         lastPos = GetPos();
@@ -382,21 +412,41 @@ public:
         jumpCounter = 0;
         Vec3 targetPos = {0,0,0};
         bool hasTarget = false;
+        bool movingForward = false;
 
         while (active) {
-            if (!running || emergency) { StopAll(); Sleep(100); continue; }
+            if (!running || emergency) { 
+                // Отпускаем все клавиши
+                keybd_event('W', 0, KEYEVENTF_KEYUP, 0);
+                keybd_event('S', 0, KEYEVENTF_KEYUP, 0);
+                keybd_event('A', 0, KEYEVENTF_KEYUP, 0);
+                keybd_event('D', 0, KEYEVENTF_KEYUP, 0);
+                keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+                Sleep(100); 
+                continue; 
+            }
             
             scanCount++;
             Vec3 pos = GetPos();
             
             // Проверка застревания
             float move = sqrt(pow(pos.x - lastPos.x, 2) + pow(pos.y - lastPos.y, 2));
-            if (move < 0.03f) {
+            if (move < 0.03f && movingForward) {
                 stuckCount++;
                 if (stuckCount > 60) {
                     Print("[WARN] Stuck! Jumping...", 14);
-                    PressSpace(); Sleep(150); PressSpace();
-                    PressA(); Sleep(400); ReleaseA();
+                    // Прыжок через бинд space
+                    keybd_event(VK_SPACE, 0, 0, 0);
+                    Sleep(50);
+                    keybd_event(VK_SPACE, 0, KEYEVENTF_KEYUP, 0);
+                    Sleep(150);
+                    keybd_event(VK_SPACE, 0, 0, 0);
+                    Sleep(50);
+                    keybd_event(VK_SPACE, 0, KEYEVENTF_KEYUP, 0);
+                    // Поворот налево
+                    keybd_event('A', 0, 0, 0);
+                    Sleep(400);
+                    keybd_event('A', 0, KEYEVENTF_KEYUP, 0);
                     stuckCount = 0;
                 }
             } else {
@@ -410,15 +460,19 @@ public:
                 ScanObstacles();
             }
 
-            // Логика
+            // ===== ЛОГИКА =====
             if (carrying) {
                 if (deliveryPoint.x != 0 && deliveryPoint.x > -5000 && deliveryPoint.x < 5000) {
                     float dist = sqrt(pow(deliveryPoint.x - pos.x, 2) + pow(deliveryPoint.y - pos.y, 2));
                     if (dist < 2.0f) {
-                        carrying = false; delivered++; ReleaseShift(); StopAll();
+                        carrying = false; delivered++;
+                        // Отпускаем Shift (бег)
+                        keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+                        // Отпускаем W
+                        keybd_event('W', 0, KEYEVENTF_KEYUP, 0);
                         Print("[DONE] Box delivered! (" + to_string(delivered) + ")", 10);
                         obstacles.push_back(pos);
-                        jumpCounter = 0; hasTarget = false;
+                        jumpCounter = 0; hasTarget = false; movingForward = false;
                         continue;
                     } else {
                         targetPos = deliveryPoint; hasTarget = true;
@@ -448,9 +502,11 @@ public:
                         collectedMarkers.push_back(*nearest);
                         markers.erase(remove_if(markers.begin(), markers.end(),
                             [nearest](Marker& m) { return m.address == nearest->address; }), markers.end());
-                        ReleaseShift(); StopAll();
+                        // Отпускаем Shift и W
+                        keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+                        keybd_event('W', 0, KEYEVENTF_KEYUP, 0);
                         Print("[TAKEN] Box taken! (" + to_string(collected) + ")", 14);
-                        jumpCounter = 0; hasTarget = false;
+                        jumpCounter = 0; hasTarget = false; movingForward = false;
                         continue;
                     } else {
                         targetPos = nearest->pos; 
@@ -462,44 +518,50 @@ public:
                 }
             }
 
-            // ===== ДВИЖЕНИЕ С ОБХОДОМ =====
+            // ===== ДВИЖЕНИЕ С БИНДАМИ =====
             if (hasTarget && targetPos.x > -5000 && targetPos.x < 5000) {
                 Vec3 posNow = GetPos();
                 float distToTarget = sqrt(pow(targetPos.x - posNow.x, 2) + pow(targetPos.y - posNow.y, 2));
                 
                 if (distToTarget < 2.0f) { 
                     hasTarget = false; 
-                    StopAll(); 
+                    keybd_event('W', 0, KEYEVENTF_KEYUP, 0);
+                    movingForward = false;
                     continue; 
                 }
 
-                // Проверяем препятствия на пути
+                // Проверяем препятствия
                 Vec3 obstacleTarget = AvoidObstacle(targetPos);
                 float obsDist = sqrt(pow(obstacleTarget.x - posNow.x, 2) + pow(obstacleTarget.y - posNow.y, 2));
                 if (obsDist > 2.0f && obsDist < 20.0f) {
                     targetPos = obstacleTarget;
                 }
 
-                // Плавный поворот к цели
+                // Плавный поворот (через A/D)
                 TurnToTarget(targetPos);
                 
-                // Движение вперёд
-                PressW(); 
-                ReleaseS();
+                // Движение вперёд (через бинд W)
+                keybd_event('W', 0, 0, 0);
+                keybd_event('S', 0, KEYEVENTF_KEYUP, 0);
+                movingForward = true;
                 
-                // Бег (без ящика)
+                // Бег (через бинд Shift)
                 if (!carrying) {
-                    PressShift();
+                    keybd_event(VK_SHIFT, 0, 0, 0);
                     jumpCounter++;
                     if (jumpCounter % 5 == 0 && distToTarget > 4.0f) { 
-                        PressSpace(); 
+                        keybd_event(VK_SPACE, 0, 0, 0);
+                        Sleep(50);
+                        keybd_event(VK_SPACE, 0, KEYEVENTF_KEYUP, 0);
                     }
                     if (jumpCounter > 25) jumpCounter = 0;
                 } else {
-                    ReleaseShift();
+                    keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
                 }
             } else {
-                StopAll();
+                // Отпускаем W если нет цели
+                keybd_event('W', 0, KEYEVENTF_KEYUP, 0);
+                movingForward = false;
             }
             
             Sleep(35);
@@ -509,12 +571,12 @@ public:
     // ==================== PRINT ====================
     void Print(string text, int color = 15) { SetColor(color); cout << text << endl; SetColor(15); }
 
-    // ==================== CONTROL ====================
+    // ==================== УПРАВЛЕНИЕ ====================
     void Start() {
         if (running) { Print("[WARN] Bot already running!", 14); return; }
         if (!proc || !playerAddr) { Print("[ERROR] Bot not initialized!", 12); return; }
         
-        running = true; emergency = false; carrying = false; shiftPressed = false;
+        running = true; emergency = false; carrying = false;
         markers.clear();
         collectedMarkers.clear();
         obstacles.clear();
@@ -525,15 +587,41 @@ public:
             Sleep(500);
         }
         
+        // Применяем бинды
+        ApplyBinds();
+        
         Print("[START] Bot started! Press F11 for emergency stop.", 10);
-        Print("[INFO] Make sure the game window is ACTIVE!", 11);
-        Print("[INFO] Obstacle avoidance enabled!", 11);
+        Print("[INFO] Binds active: W=forward S=back A/D=turn Shift=sprint Space=jump", 11);
         
         thread(&Bot::BotLoop, this).detach();
     }
 
-    void Stop() { running = false; StopAll(); ReleaseShift(); Print("[STOP] Bot stopped. Collected: " + to_string(collected) + " | Delivered: " + to_string(delivered), 14); }
-    void EmergencyStop() { emergency = true; running = false; active = false; StopAll(); ReleaseShift(); Print("[EMERGENCY] EMERGENCY STOP! (F11)", 12); }
+    void Stop() { 
+        running = false; 
+        // Отпускаем все клавиши
+        keybd_event('W', 0, KEYEVENTF_KEYUP, 0);
+        keybd_event('S', 0, KEYEVENTF_KEYUP, 0);
+        keybd_event('A', 0, KEYEVENTF_KEYUP, 0);
+        keybd_event('D', 0, KEYEVENTF_KEYUP, 0);
+        keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+        // Сбрасываем бинды
+        UnbindAll();
+        Print("[STOP] Bot stopped. Collected: " + to_string(collected) + " | Delivered: " + to_string(delivered), 14); 
+    }
+    
+    void EmergencyStop() { 
+        emergency = true; 
+        running = false; 
+        active = false; 
+        keybd_event('W', 0, KEYEVENTF_KEYUP, 0);
+        keybd_event('S', 0, KEYEVENTF_KEYUP, 0);
+        keybd_event('A', 0, KEYEVENTF_KEYUP, 0);
+        keybd_event('D', 0, KEYEVENTF_KEYUP, 0);
+        keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+        UnbindAll();
+        Print("[EMERGENCY] EMERGENCY STOP! (F11)", 12); 
+    }
+
     void SpeedUp() { speed = min(0.8f, speed + 0.1f); Print("[SPEED] Speed: " + to_string(speed), 11); }
     void SpeedDown() { speed = max(0.1f, speed - 0.1f); Print("[SPEED] Speed: " + to_string(speed), 11); }
 
@@ -552,6 +640,7 @@ public:
         cout << "  Delivered:  " << delivered << endl;
         cout << "  Found:      " << markers.size() << " boxes" << endl;
         cout << "  Obstacles:  " << obstacles.size() << endl;
+        cout << "  Binds:      " << (bindsActive ? "[ACTIVE]" : "[REMOVED]") << endl;
         if (deliveryPoint.x != 0 && deliveryPoint.x > -5000 && deliveryPoint.x < 5000) {
             cout << "  Drop:       X=" << (int)deliveryPoint.x << " Y=" << (int)deliveryPoint.y << endl;
         }
@@ -569,20 +658,23 @@ public:
         cout << "           CONTROLS" << endl;
         cout << "========================================" << endl;
         SetColor(15);
-        cout << "  F1  - Start bot" << endl;
-        cout << "  F2  - Stop bot" << endl;
+        cout << "  F1  - Start bot (applies binds)" << endl;
+        cout << "  F2  - Stop bot (removes binds)" << endl;
         cout << "  F3  - Faster" << endl;
         cout << "  F4  - Slower" << endl;
         cout << "  F5  - Status" << endl;
-        cout << "  F11 - EMERGENCY STOP" << endl;
-        cout << "  ESC - Exit" << endl;
+        cout << "  F11 - EMERGENCY STOP (removes binds)" << endl;
+        cout << "  ESC - Exit (removes binds)" << endl;
         cout << endl;
-        cout << "  BOT CONTROLS (auto):" << endl;
-        cout << "  W - Forward" << endl;
-        cout << "  A/D - Smooth turn" << endl;
-        cout << "  Shift - Sprint (no box)" << endl;
-        cout << "  Space - Jump" << endl;
-        cout << "  + Obstacle avoidance" << endl;
+        cout << "  BINDS (auto-applied):" << endl;
+        cout << "  w - +forward" << endl;
+        cout << "  s - +backward" << endl;
+        cout << "  a - +left" << endl;
+        cout << "  d - +right" << endl;
+        cout << "  shift - +sprint" << endl;
+        cout << "  space - +jump" << endl;
+        cout << endl;
+        cout << "  Binds are REMOVED when bot stops!" << endl;
         SetColor(14);
         cout << "========================================" << endl;
         cout << "  Stealth mode - Anti-cheat safe" << endl;
@@ -598,7 +690,11 @@ public:
             if (GetAsyncKeyState(VK_F4) & 1) SpeedDown();
             if (GetAsyncKeyState(VK_F5) & 1) ShowStatus();
             if (GetAsyncKeyState(VK_F11) & 1) EmergencyStop();
-            if (GetAsyncKeyState(VK_ESCAPE) & 1) { EmergencyStop(); Print("[EXIT] Exiting...", 14); exit(0); }
+            if (GetAsyncKeyState(VK_ESCAPE) & 1) { 
+                EmergencyStop(); 
+                Print("[EXIT] Exiting...", 14); 
+                exit(0); 
+            }
             Sleep(50);
         }
     }
@@ -623,14 +719,12 @@ int main() {
     cout << "  [BOX] Collects boxes" << endl;
     cout << "  [DROP] Delivers to drop point" << endl;
     cout << "  [AVOID] Smart obstacle avoidance" << endl;
-    cout << "  [SMOOTH] Smooth turning & movement" << endl;
-    cout << "  [REAL] Looks like a real player" << endl;
+    cout << "  [BINDS] Uses in-game binds (auto-removed)" << endl;
     cout << "==================================================" << endl;
     SetColor(14);
     cout << "\n  [WARN] Run as Administrator!" << endl;
     cout << "  [WARN] MTA Province must be running!" << endl;
-    cout << "  [WARN] GAME WINDOW MUST BE ACTIVE!" << endl;
-    cout << "  [WARN] DO NOT MINIMIZE THE GAME!" << endl;
+    cout << "  [WARN] Binds are REMOVED when bot stops!" << endl;
     cout << "  [WARN] Press F5 for controls" << endl;
     cout << endl;
     SetColor(15);
@@ -648,7 +742,8 @@ int main() {
     SetColor(10);
     cout << "[OK] BOT READY!" << endl;
     SetColor(15);
-    cout << "[INFO] Press F1 to start" << endl;
+    cout << "[INFO] Press F1 to start (applies binds)" << endl;
+    cout << "[INFO] Press F2 to stop (removes binds)" << endl;
     cout << endl;
 
     thread handler(&Bot::HotkeyHandler, &bot);
