@@ -1,4 +1,4 @@
-// main.cpp - MTA Bot with Bind System (Complete)
+// main.cpp - MTA Bot with Fixed Chat Commands
 #define _USE_MATH_DEFINES
 #include <windows.h>
 #include <tlhelp32.h>
@@ -107,6 +107,9 @@ private:
     int avoidanceCounter;
     float lastDistanceToTarget;
     int sameDistanceCount;
+    
+    // Состояние клавиш
+    bool wPressed, aPressed, sPressed, dPressed, shiftPressed;
 
 public:
     Bot() : proc(NULL), pid(0), playerAddr(0), baseAddr(0), running(false),
@@ -115,7 +118,8 @@ public:
             jumpCounter(0), forwardBound(false), backBound(false),
             leftBound(false), rightBound(false), sprintBound(false),
             currentAngleDiff(0), avoiding(false), avoidanceCounter(0),
-            lastDistanceToTarget(0), sameDistanceCount(0), pedAddress(0) {
+            lastDistanceToTarget(0), sameDistanceCount(0), pedAddress(0),
+            wPressed(false), aPressed(false), sPressed(false), dPressed(false), shiftPressed(false) {
         deliveryPoint = {0,0,0};
         lastPos = {0,0,0};
         avoidancePoint = {0,0,0};
@@ -125,7 +129,7 @@ public:
     }
 
     ~Bot() { 
-        CleanupBinds();
+        StopAll();
         if (proc) CloseHandle(proc); 
     }
 
@@ -258,113 +262,37 @@ public:
         return pos;
     }
 
-    void SendChatCommand(string cmd) {
-        if (!gameWnd) return;
-        
-        PostMessage(gameWnd, WM_KEYDOWN, 'T', 0);
+    // ==================== ПРЯМОЕ УПРАВЛЕНИЕ КЛАВИШАМИ ====================
+    void SendKey(WORD key, bool press) {
+        keybd_event((BYTE)key, 0, press ? 0 : KEYEVENTF_KEYUP, 0);
+        Sleep(10);
+    }
+
+    void PressW() { if (!wPressed) { SendKey('W', true); wPressed = true; } }
+    void ReleaseW() { if (wPressed) { SendKey('W', false); wPressed = false; } }
+    void PressS() { if (!sPressed) { SendKey('S', true); sPressed = true; } }
+    void ReleaseS() { if (sPressed) { SendKey('S', false); sPressed = false; } }
+    void PressA() { if (!aPressed) { SendKey('A', true); aPressed = true; } }
+    void ReleaseA() { if (aPressed) { SendKey('A', false); aPressed = false; } }
+    void PressD() { if (!dPressed) { SendKey('D', true); dPressed = true; } }
+    void ReleaseD() { if (dPressed) { SendKey('D', false); dPressed = false; } }
+    void PressShift() { if (!shiftPressed) { SendKey(VK_SHIFT, true); shiftPressed = true; } }
+    void ReleaseShift() { if (shiftPressed) { SendKey(VK_SHIFT, false); shiftPressed = false; } }
+    void PressSpace() { 
+        SendKey(VK_SPACE, true);
         Sleep(50);
-        PostMessage(gameWnd, WM_KEYUP, 'T', 0);
-        Sleep(100);
-        
-        if (OpenClipboard(NULL)) {
-            EmptyClipboard();
-            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, cmd.length() + 1);
-            if (hMem) {
-                char* pMem = (char*)GlobalLock(hMem);
-                strcpy(pMem, cmd.c_str());
-                GlobalUnlock(hMem);
-                SetClipboardData(CF_TEXT, hMem);
-            }
-            CloseClipboard();
-        }
-        
-        keybd_event(VK_CONTROL, 0, 0, 0);
-        keybd_event('V', 0, 0, 0);
-        keybd_event('V', 0, KEYEVENTF_KEYUP, 0);
-        keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
-        Sleep(100);
-        
-        keybd_event(VK_RETURN, 0, 0, 0);
-        keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
-        Sleep(100);
-    }
-
-    void SetupBinds() {
-        Print("[BINDS] Setting up movement binds...", 11);
-        
-        SendChatCommand("bind w forward");
-        Sleep(200);
-        SendChatCommand("bind s back");
-        Sleep(200);
-        SendChatCommand("bind a left");
-        Sleep(200);
-        SendChatCommand("bind d right");
-        Sleep(200);
-        SendChatCommand("bind shift sprint");
-        Sleep(200);
-        SendChatCommand("bind space jump");
-        Sleep(200);
-        
-        forwardBound = true;
-        backBound = true;
-        leftBound = true;
-        rightBound = true;
-        sprintBound = true;
-        
-        Print("[BINDS] Movement binds configured!", 10);
-    }
-
-    void CleanupBinds() {
-        if (!forwardBound && !backBound && !leftBound && !rightBound && !sprintBound) return;
-        
-        Print("[BINDS] Cleaning up binds...", 11);
-        
-        SendChatCommand("unbind w");
-        Sleep(200);
-        SendChatCommand("unbind s");
-        Sleep(200);
-        SendChatCommand("unbind a");
-        Sleep(200);
-        SendChatCommand("unbind d");
-        Sleep(200);
-        SendChatCommand("unbind shift");
-        Sleep(200);
-        SendChatCommand("unbind space");
-        Sleep(200);
-        
-        forwardBound = false;
-        backBound = false;
-        leftBound = false;
-        rightBound = false;
-        sprintBound = false;
-        
-        Print("[BINDS] Binds cleaned up!", 10);
-    }
-
-    void PressForward() { SendChatCommand("setControlState forward true"); }
-    void ReleaseForward() { SendChatCommand("setControlState forward false"); }
-    void PressBack() { SendChatCommand("setControlState back true"); }
-    void ReleaseBack() { SendChatCommand("setControlState back false"); }
-    void PressLeft() { SendChatCommand("setControlState left true"); }
-    void ReleaseLeft() { SendChatCommand("setControlState left false"); }
-    void PressRight() { SendChatCommand("setControlState right true"); }
-    void ReleaseRight() { SendChatCommand("setControlState right false"); }
-    void PressSprint() { SendChatCommand("setControlState sprint true"); }
-    void ReleaseSprint() { SendChatCommand("setControlState sprint false"); }
-    void PressJump() { 
-        SendChatCommand("setControlState jump true");
-        Sleep(50);
-        SendChatCommand("setControlState jump false");
+        SendKey(VK_SPACE, false);
     }
 
     void StopAll() {
-        ReleaseForward();
-        ReleaseBack();
-        ReleaseLeft();
-        ReleaseRight();
-        ReleaseSprint();
+        ReleaseW();
+        ReleaseS();
+        ReleaseA();
+        ReleaseD();
+        ReleaseShift();
     }
 
+    // ==================== ПОВОРОТ ====================
     void TurnToTarget(Vec3 target) {
         Vec3 pos = GetPos();
         float angle = atan2(target.y - pos.y, target.x - pos.x);
@@ -380,23 +308,24 @@ public:
         while (diff < -180) diff += 360;
         
         if (abs(diff) > 15) {
-            if (diff > 0) { PressRight(); ReleaseLeft(); }
-            else { PressLeft(); ReleaseRight(); }
+            if (diff > 0) { PressD(); ReleaseA(); }
+            else { PressA(); ReleaseD(); }
         } else if (abs(diff) > 5) {
             if (diff > 0) { 
-                PressRight(); Sleep(20); ReleaseRight();
-                ReleaseLeft();
+                PressD(); Sleep(20); ReleaseD();
+                ReleaseA();
             } else { 
-                PressLeft(); Sleep(20); ReleaseLeft();
-                ReleaseRight();
+                PressA(); Sleep(20); ReleaseA();
+                ReleaseD();
             }
         } else {
-            ReleaseLeft(); ReleaseRight();
+            ReleaseA(); ReleaseD();
         }
         
         currentAngleDiff = diff;
     }
 
+    // ==================== СКАНИРОВАНИЕ МАРКЕРОВ ====================
     void ScanMarkers() {
         if (!proc || !baseAddr) return;
         auto now = chrono::high_resolution_clock::now();
@@ -478,6 +407,7 @@ public:
         }
     }
 
+    // ==================== ИЗБЕГАНИЕ ПРЕПЯТСТВИЙ ====================
     Vec3 AvoidObstacle(Vec3 target) {
         Vec3 pos = GetPos();
         Vec3 result = target;
@@ -533,6 +463,7 @@ public:
         return result;
     }
 
+    // ==================== ГЛАВНЫЙ ЦИКЛ ====================
     void BotLoop() {
         active = true;
         Print("[START] Bot started! Press F11 for emergency stop.", 10);
@@ -557,7 +488,7 @@ public:
                     Print("[WARN] Stuck! Avoiding...", 14);
                     
                     if (avoiding) {
-                        PressJump(); Sleep(200); PressJump();
+                        PressSpace(); Sleep(200); PressSpace();
                     } else {
                         avoiding = true;
                         avoidanceCounter = 40;
@@ -593,7 +524,7 @@ public:
                 if (deliveryPoint.x != 0) {
                     float dist = sqrt(pow(deliveryPoint.x - pos.x, 2) + pow(deliveryPoint.y - pos.y, 2));
                     if (dist < 2.0f) {
-                        carrying = false; delivered++; ReleaseSprint(); StopAll();
+                        carrying = false; delivered++; ReleaseShift(); StopAll();
                         Print("[DONE] Box delivered! (" + to_string(delivered) + ")", 10);
                         obstacles.push_back(pos);
                         jumpCounter = 0; hasTarget = false;
@@ -627,7 +558,7 @@ public:
                         collectedMarkers.push_back(*nearest);
                         markers.erase(remove_if(markers.begin(), markers.end(),
                             [nearest](Marker& m) { return m.address == nearest->address; }), markers.end());
-                        ReleaseSprint(); StopAll();
+                        ReleaseShift(); StopAll();
                         Print("[TAKEN] Box taken! (" + to_string(collected) + ")", 14);
                         jumpCounter = 0; hasTarget = false;
                         avoiding = false;
@@ -691,34 +622,34 @@ public:
                 TurnToTarget(moveTarget);
                 
                 if (abs(currentAngleDiff) < 30) {
-                    PressForward();
-                    ReleaseBack();
+                    PressW();
+                    ReleaseS();
                 } else {
-                    ReleaseForward();
-                    ReleaseBack();
+                    ReleaseW();
+                    ReleaseS();
                 }
                 
                 if (!carrying) {
                     if (distToTarget > 15.0f && abs(currentAngleDiff) < 15) {
-                        PressSprint();
+                        PressShift();
                     } else {
-                        ReleaseSprint();
+                        ReleaseShift();
                     }
                     
                     jumpCounter++;
                     if (jumpCounter % 4 == 0 && distToTarget > 5.0f && abs(currentAngleDiff) < 10 && !avoiding) { 
-                        PressJump(); 
+                        PressSpace(); 
                     }
                 } else {
-                    ReleaseSprint();
+                    ReleaseShift();
                 }
                 
                 if (distToTarget < 5.0f) {
-                    ReleaseSprint();
+                    ReleaseShift();
                     if (distToTarget < 3.0f) {
-                        PressForward();
+                        PressW();
                         Sleep(30);
-                        ReleaseForward();
+                        ReleaseW();
                         Sleep(20);
                     }
                 }
@@ -731,7 +662,6 @@ public:
         }
         
         StopAll();
-        CleanupBinds();
     }
 
     void Print(string text, int color = 15) { 
@@ -760,11 +690,8 @@ public:
             Sleep(500);
         }
         
-        SetupBinds();
-        Sleep(1000);
-        
         Print("[START] Bot started! Press F11 for emergency stop.", 10);
-        Print("[INFO] Using MTA binds for movement", 11);
+        Print("[INFO] Using direct key simulation", 11);
         
         thread(&Bot::BotLoop, this).detach();
     }
@@ -772,7 +699,6 @@ public:
     void Stop() { 
         running = false; 
         StopAll(); 
-        CleanupBinds();
         Print("[STOP] Bot stopped. Collected: " + to_string(collected) + " | Delivered: " + to_string(delivered), 14); 
     }
     
@@ -781,7 +707,6 @@ public:
         running = false; 
         active = false; 
         StopAll(); 
-        CleanupBinds();
         Print("[EMERGENCY] EMERGENCY STOP! (F11)", 12); 
     }
     
@@ -811,7 +736,6 @@ public:
         cout << "  Found:      " << markers.size() << " boxes" << endl;
         cout << "  Obstacles:  " << obstacles.size() << endl;
         cout << "  Avoiding:   " << (avoiding ? "[YES]" : "[NO]") << endl;
-        cout << "  Binds:      " << (forwardBound ? "[ACTIVE]" : "[INACTIVE]") << endl;
         if (deliveryPoint.x != 0 && deliveryPoint.x > -5000 && deliveryPoint.x < 5000) {
             cout << "  Drop:       X=" << (int)deliveryPoint.x << " Y=" << (int)deliveryPoint.y << endl;
         }
@@ -857,7 +781,7 @@ int main() {
     cout << "\n==================================================" << endl;
     cout << "      STEALTH COLLECTOR BOT FOR MTA PROVINCE" << endl;
     cout << "==================================================" << endl;
-    cout << "  [BINDS] Uses MTA bind system for movement" << endl;
+    cout << "  [KEYS] Direct key simulation (WASD)" << endl;
     cout << "  [BOX] Collects boxes" << endl;
     cout << "  [DROP] Delivers to drop point" << endl;
     cout << "  [AVOID] Improved obstacle avoidance" << endl;
@@ -865,6 +789,7 @@ int main() {
     SetColor(14);
     cout << "\n  [WARN] Run as Administrator!" << endl;
     cout << "  [WARN] MTA Province must be running!" << endl;
+    cout << "  [WARN] Game window MUST be active!" << endl;
     cout << "  [WARN] Press F1 to start bot" << endl;
     cout << "  [WARN] Press F5 for status" << endl;
     cout << endl;
