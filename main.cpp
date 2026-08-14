@@ -1,4 +1,4 @@
-// main.cpp - MTA Province Collector Bot (with SendInput)
+// main.cpp - MTA Province Collector Bot (keybd_event)
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
@@ -141,14 +141,10 @@ public:
         return pos;
     }
 
-    // ==================== KEYS WITH SendInput ====================
+    // ==================== KEYS with keybd_event ====================
     void SendKey(WORD key, bool press) {
-        INPUT ip = {0};
-        ip.type = INPUT_KEYBOARD;
-        ip.ki.wVk = key;
-        ip.ki.dwFlags = press ? 0 : KEYEVENTF_KEYUP;
-        SendInput(1, &ip, sizeof(INPUT));
-        Sleep(5);
+        keybd_event((BYTE)key, 0, press ? 0 : KEYEVENTF_KEYUP, 0);
+        Sleep(10);
     }
 
     void PressW() { if (!wPressed) { SendKey('W', true); wPressed = true; } }
@@ -165,7 +161,7 @@ public:
     
     void PressSpace() { 
         SendKey(VK_SPACE, true);
-        Sleep(30);
+        Sleep(50);
         SendKey(VK_SPACE, false);
     }
 
@@ -383,11 +379,6 @@ public:
         if (gameWnd) { 
             SetForegroundWindow(gameWnd);
             Sleep(500);
-            // Клик в окно чтобы активировать
-            SetCursorPos(100, 100);
-            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-            Sleep(200);
         }
         Print("[START] Bot started! Press F11 for emergency stop.", 10);
         thread(&Bot::BotLoop, this).detach();
